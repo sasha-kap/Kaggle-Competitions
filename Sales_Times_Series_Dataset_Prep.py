@@ -497,6 +497,11 @@ def build_date_lvl_features():
 
 # ITEM-DATE-LEVEL FEATURES
 
+def drange(date_ser):
+    s = date_ser.min()
+    e = date_ser.max()
+    return pd.Series(pd.date_range(s,e))
+
 def build_item_date_lvl_features(sales):
 
     # Quantity Sold
@@ -504,16 +509,48 @@ def build_item_date_lvl_features(sales):
     # create column with quantity sold by item-date
     item_date_level_features = (sales.groupby(['item_id','date'])['item_cnt_day'].sum().reset_index().rename(columns={'item_cnt_day':'item_qty_sold_day'}))
 
-    # Previous Quantity Sold
+    # Add missing item-dates (between first and last dates for each item) with 0 values for quantity sold
+    all_item_dates = item_date_level_features.groupby('item_id').date.apply(drange)
+    all_item_dates = all_item_dates.reset_index(level=0).reset_index(drop=True)
+    item_date_level_features = all_item_dates.merge(item_date_level_features, on=['item_id','date'], how='left')
+    item_date_level_features.item_qty_sold_day.fillna(0, inplace=True)
 
-    # create lag column for quantity sold, grouped by item
-    shifted = item_date_level_features.groupby('item_id').item_qty_sold_day.shift()
-    item_date_level_features = item_date_level_features.join(shifted.rename('item_qty_sold_day_lag'))
+    # Add missing item-dates (between last observed sale date and last day of the training period) for items that exist in test dataset
+    test_items = test_df[['item_id']].drop_duplicates().reset_index(drop=True).sort_values(by='item_id')
+    last_item_dts_in_train_data = item_date_level_features.groupby('item_id').date.max().reset_index().rename(columns={'date':'last_item_date'})
+
+    last_item_dts_in_train_data['last_train_dt'] = datetime.datetime(2015,11,1)
+
+    addl_dates = last_item_dts_in_train_data.set_index('item_id').stack().reset_index(level=1, drop=True).to_frame().rename(columns={0:'date'})
+    addl_dates = addl_dates.groupby(long_df.index).apply(lambda x: x.set_index('date').resample('D').asfreq())
+    addl_dates.reset_index(inplace=True)
+    addl_dates = addl_dates[addl_dates.date != datetime.datetime(2015,11,1)]
+    addl_dates = addl_dates.groupby('item_id').apply(lambda group: group.iloc[1:, ])
+    addl_dates.reset_index(drop=True, inplace=True)
+
+    addl_dates = addl_dates.merge(test_items, on='item_id', how='inner')
+
+    item_date_level_features = pd.concat([item_date_level_features,addl_dates], axis=0, ignore_index=True)
+    item_date_level_features.sort_values(by=['item_id','date'], inplace=True)
+    item_date_level_features.item_qty_sold_day.fillna(0, inplace=True)
+
+    # Previous Non-Zero Quantity Sold
+
+    item_date_level_features['item_last_qty_sold'] = item_date_level_features.item_qty_sold_day.replace(to_replace=0, method='ffill').shift()
+    item_date_level_features.loc[item_date_level_features.groupby('item_id')['item_last_qty_sold'].head(1).index, 'item_last_qty_sold'] = np.NaN
+    # fill null values (first item-date) with 0's
+    item_date_level_features.item_last_qty_sold.fillna(0, inplace=True)
 
     # Days Elapsed Since Last Sale of Same Item
 
     # create column for time elapsed since previous sale of same item
-    item_date_level_features['item_days_since_prev_sale'] = (item_date_level_features.groupby('item_id').date.diff().dt.days)
+    item_date_level_features['item_last_date'] = np.where(item_date_level_features.item_qty_sold_day > 0, item_date_level_features.date, None)
+    item_date_level_features['item_last_date'] = pd.to_datetime(item_date_level_features.item_last_date)
+    item_date_level_features['item_last_date'] = item_date_level_features.item_last_date.fillna(method='ffill').shift()
+    item_date_level_features.loc[item_date_level_features.groupby('item_id')['item_last_date'].head(1).index, 'item_last_date'] = pd.NaT
+    item_date_level_features['item_days_since_prev_sale'] = item_date_level_features.date.sub(item_date_level_features.item_last_date).dt.days
+    item_date_level_features.item_days_since_prev_sale.fillna(0, inplace=True)
+    item_date_level_features.drop('item_last_date', axis=1, inplace=True)
 
     # Days Elapsed Since First Date of Sale of Same Item
 
@@ -541,69 +578,63 @@ def build_item_date_lvl_features(sales):
 
     item_date_level_features.drop(columns=['yr_mon'], inplace=True)
 
-    # Days Left Until the Last Observed Sale Date of Item
+    # Rolling 7-day min and max quantity values, excluding current day except for first item-date
 
-    # create column for time until last observed sale date of same item
-    item_date_level_features['item_days_until_last_sale'] = (
-        (item_date_level_features.groupby('item_id')['date'].transform('last')
-         - item_date_level_features['date']).dt.days)
-
-    # Rolling Values
-
-    df_for_rolling_cts = item_date_level_features[['item_id','date','item_qty_sold_day']].set_index('date')
-
-    item_date_level_features['item_rolling_7d_max_qty'] = (df_for_rolling_cts.groupby('item_id')['item_qty_sold_day']
-                                                       .rolling("7D").max().values)
-
-    item_date_level_features['item_rolling_7d_min_qty'] = (df_for_rolling_cts.groupby('item_id')['item_qty_sold_day']
-                                                       .rolling("7D").min().values)
+    item_date_level_features['item_rolling_7d_max_qty'] = item_date_level_features.groupby('item_id')['item_qty_sold_day'].apply(lambda x: x.rolling(7,1).max().shift().bfill())
+    item_date_level_features['item_rolling_7d_min_qty'] = item_date_level_features.groupby('item_id')['item_qty_sold_day'].apply(lambda x: x.rolling(7,1).min().shift().bfill())
 
     # Expanding Max, Min, Mean Quantity Values
 
     item_date_level_features['item_expand_qty_max'] = (item_date_level_features
                                                              .groupby('item_id')['item_qty_sold_day']
-                                                             .expanding().max().values)
+                                                             .apply(lambda x: x.expanding().max().shift().bfill()))
 
     item_date_level_features['item_expand_qty_min'] = (item_date_level_features
                                                              .groupby('item_id')['item_qty_sold_day']
-                                                             .expanding().min().values)
+                                                             .apply(lambda x: x.expanding().min().shift().bfill()))
 
     item_date_level_features['item_expand_qty_mean'] = (item_date_level_features
                                                              .groupby('item_id')['item_qty_sold_day']
-                                                             .expanding().mean().values)
+                                                             .apply(lambda x: x.expanding().mean().shift().bfill()))
 
     # Quantity Sold 1, 2, 3 Days Ago
 
-    df_for_date_replacement = (item_date_level_features[['item_id','date','item_qty_sold_day']]
-                               .rename(columns={'item_qty_sold_day':'item_qty_sold_1d_ago'}))
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    item_date_level_features = item_date_level_features.merge(df_for_date_replacement, on=['item_id','date'], how='left')
+    item_date_level_features['item_qty_sold_1d_ago'] = item_date_level_features.groupby('item_id')['item_qty_sold_day'].shift()
     item_date_level_features.item_qty_sold_1d_ago.fillna(0, inplace=True)
 
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    df_for_date_replacement.rename(columns={'item_qty_sold_1d_ago':'item_qty_sold_2d_ago'}, inplace=True)
-    item_date_level_features = item_date_level_features.merge(df_for_date_replacement, on=['item_id','date'], how='left')
+    item_date_level_features['item_qty_sold_2d_ago'] = item_date_level_features.groupby('item_id')['item_qty_sold_day'].shift(2)
     item_date_level_features.item_qty_sold_2d_ago.fillna(0, inplace=True)
 
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    df_for_date_replacement.rename(columns={'item_qty_sold_2d_ago':'item_qty_sold_3d_ago'}, inplace=True)
-    item_date_level_features = item_date_level_features.merge(df_for_date_replacement, on=['item_id','date'], how='left')
+    item_date_level_features['item_qty_sold_3d_ago'] = item_date_level_features.groupby('item_id')['item_qty_sold_day'].shift(3)
     item_date_level_features.item_qty_sold_3d_ago.fillna(0, inplace=True)
 
-    # Longest and Shortest Time Intervals Between Sales of Items Up to Current Date
+    # Longest Time Interval Between Sales of Items Up to (and Not Including) Current Date
 
-    item_date_level_features['item_date_max_gap_bw_sales'] = (item_date_level_features.groupby('item_id')
-                                                              .item_days_since_prev_sale.expanding().max().values)
-
-    item_date_level_features['item_date_min_gap_bw_sales'] = (item_date_level_features.groupby('item_id')
-                                                              .item_days_since_prev_sale.expanding().min().values)
+    item_date_level_features['item_days_since_prev_sale_lmtd'] = np.where(item_date_level_features.item_qty_sold_day > 0, item_date_level_features.item_days_since_prev_sale, np.nan)
+    item_date_level_features['item_date_max_gap_bw_sales'] = (item_date_level_features.groupby('item_id')['item_days_since_prev_sale_lmtd']
+                                                              .apply(lambda x: x.expanding().max().shift().bfill()))
+    item_date_level_features.drop('item_days_since_prev_sale_lmtd', axis=1, inplace=True)
 
     # Difference Between Last and Second-to-Last Quantities Sold
 
-    item_date_level_features['item_date_diff_bw_last_and_prev_qty'] = (item_date_level_features.groupby('item_id')
+    non_zero_qty_item_dates = item_date_level_features[item_date_level_features.item_qty_sold_day != 0][['item_id','date','item_qty_sold_day']]
+    last_date_per_item = item_date_level_features[['item_id','date','item_qty_sold_day']].groupby('item_id').tail(1).reset_index(drop=True)
+    last_date_per_item = last_date_per_item[last_date_per_item.item_qty_sold_day == 0]
+    last_date_per_item['date'] = datetime.datetime(2015,11,1)
+    last_date_per_item['item_qty_sold_day'] = 10
+    non_zero_qty_item_dates = pd.concat([non_zero_qty_item_dates, last_date_per_item], axis=0, ignore_index=True)
+    non_zero_qty_item_dates.sort_values(by=['item_id','date'], inplace=True)
+    non_zero_qty_item_dates['item_date_diff_bw_last_and_prev_qty'] = (non_zero_qty_item_dates.groupby('item_id')
                                                                       .item_qty_sold_day.diff(periods=2).values -
-                                                                      item_date_level_features.groupby('item_id')
+                                                                      non_zero_qty_item_dates.groupby('item_id')
                                                                       .item_qty_sold_day.diff().values)
+    non_zero_qty_item_dates.drop('item_qty_sold_day', axis=1, inplace=True)
+    non_zero_qty_item_dates.item_date_diff_bw_last_and_prev_qty.fillna(0, inplace=True)
+
+    item_date_level_features = pd.concat([item_date_level_features,non_zero_qty_item_dates[non_zero_qty_item_dates.date == datetime.datetime(2015,11,1)][['item_id','date']]], axis=0, ignore_index=True)
+    item_date_level_features = item_date_level_features.merge(non_zero_qty_item_dates, on=['item_id','date'], how='left')
+    item_date_level_features['item_date_diff_bw_last_and_prev_qty'] = item_date_level_features.groupby('item_id').item_date_diff_bw_last_and_prev_qty.fillna(method='bfill')
+    item_date_level_features = item_date_level_features[item_date_level_features.date != datetime.datetime(2015,11,1)].reset_index(drop=True)
 
     # Demand for Category in Last Week (Quantity Sold, Count of Unique Items Sold, Quantity Sold per Item)
 
