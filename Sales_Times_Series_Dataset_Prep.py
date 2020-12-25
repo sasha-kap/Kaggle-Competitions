@@ -56,7 +56,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 # PERFORM INITIAL DATA CLEANING
-def clean_sales_data(sales):
+def clean_sales_data():
     '''Perform initial data cleaning of the train shop-item-date data.'''
 
     # convert the date column from string to datetime type
@@ -93,6 +93,21 @@ def clean_sales_data(sales):
 # SHOP-LEVEL FEATURES
 
 def lat_lon_to_float(in_coord, degree_sign = u'\N{DEGREE SIGN}', remove = degree_sign + '′' + '″'):
+    '''Convert latitude-longitude text string into latitude and longitude floats.
+
+    Parameters:
+    -----------
+    in_coord : str
+        latitude-longitude string (example format: '55°53′21″ с. ш. 37°26′42″ в. д.')
+    degree_sign : str
+        Unicode representation of degree sign
+    remove : str
+        Concatenation of characters to remove from latitude-longitude string
+
+    Returns:
+    --------
+    geo_lat, geo_lon: float values of latitude and longitude (i.e., with minutes and seconds converted to decimals)
+    '''
     geo_list = in_coord.translate({ord(char): ' ' for char in remove}).replace('с. ш.',',').replace('в. д.','').split(',')
     if len(geo_list[0].split()) == 3:
         geo_lat = float(geo_list[0].split()[0]) + float(geo_list[0].split()[1])/60. + float(geo_list[0].split()[2])/3600.
@@ -104,7 +119,14 @@ def lat_lon_to_float(in_coord, degree_sign = u'\N{DEGREE SIGN}', remove = degree
         geo_lon = float(geo_list[1].split()[0]) + float(geo_list[1].split()[1])/60.
     return geo_lat, geo_lon
 
-def build_shop_lvl_features(shops_df):
+def build_shop_lvl_features():
+    '''Build dataframe of shop-level features.
+
+    Returns:
+    --------
+    shops_df : pandas dataframe
+        Dataframe with each row representing a shop and columns containing shop-level features
+    '''
 
     # remove shop_ids 9 and 20 (as they were found to have strange sales trends)
     shops_df = shops_df[~(shops_df.shop_id.isin([9,20]))]
@@ -224,7 +246,14 @@ def group_game_consoles(cat_name):
 
 std_funct = partial(np.std, ddof=0)
 
-def build_item_lvl_features(sales):
+def build_item_lvl_features():
+    '''Build dataframe of item-level features.
+
+    Returns:
+    --------
+    item_level_features : pandas dataframe
+        Dataframe with each row representing an item and columns containing item-level features
+    '''
 
     # Coefficient of Variation of Price
 
@@ -340,6 +369,13 @@ def month_counter(d1):
     return (d1.year - datetime.datetime(2013,1,1).year) * 12 + d1.month - datetime.datetime(2013,1,1).month
 
 def build_date_lvl_features():
+    '''Build dataframe of date-level features.
+
+    Returns:
+    --------
+    date_level_features : pandas dataframe
+        Dataframe with each row representing a date and columns containing date-level features
+    '''
 
     # Dates from Start to End of Training Period
     date_level_features = pd.DataFrame({'date': pd.date_range('01-01-2013','10-31-2015')})
@@ -502,7 +538,14 @@ def drange(date_ser):
     e = date_ser.max()
     return pd.Series(pd.date_range(s,e))
 
-def build_item_date_lvl_features(sales):
+def build_item_date_lvl_features():
+    '''Build dataframe of item-date-level features.
+
+    Returns:
+    --------
+    item_date_level_features : pandas dataframe
+        Dataframe with each row representing a unique combination of item_id and date and columns containing item-date-level features
+    '''
 
     # Quantity Sold
 
@@ -522,7 +565,7 @@ def build_item_date_lvl_features(sales):
     last_item_dts_in_train_data['last_train_dt'] = datetime.datetime(2015,11,1)
 
     addl_dates = last_item_dts_in_train_data.set_index('item_id').stack().reset_index(level=1, drop=True).to_frame().rename(columns={0:'date'})
-    addl_dates = addl_dates.groupby(long_df.index).apply(lambda x: x.set_index('date').resample('D').asfreq())
+    addl_dates = addl_dates.groupby(addl_dates.index).apply(lambda x: x.set_index('date').resample('D').asfreq())
     addl_dates.reset_index(inplace=True)
     addl_dates = addl_dates[addl_dates.date != datetime.datetime(2015,11,1)]
     addl_dates = addl_dates.groupby('item_id').apply(lambda group: group.iloc[1:, ])
@@ -644,7 +687,7 @@ def build_item_date_lvl_features(sales):
 
     # create dataframe with daily totals of quantity sold for each category
     cat_date_total_qty = (item_date_level_features[['date','item_category_id','item_qty_sold_day']]
-                          .groupby('item_category_id').apply(lambda x: x.set_index('date').resample('D')
+                          .groupby('item_category_id').apply(lambda x: x.set_index('date')
                                                              .item_qty_sold_day.sum()).reset_index())
 
     # calculate rolling weekly sum of quantity sold for each category, excluding current date
@@ -659,7 +702,7 @@ def build_item_date_lvl_features(sales):
     # create dataframe with daily lists of items sold for each category
     cat_date_item_lists = (item_date_level_features[['date','item_category_id','item_id']]
                            .groupby('item_category_id')
-                           .apply(lambda x: x.set_index('date').resample('D').item_id.agg(list))
+                           .apply(lambda x: x.set_index('date').item_id.agg(list))
                            .reset_index()
                            .rename(columns={0:'item_list'}))
 
@@ -704,18 +747,51 @@ def build_item_date_lvl_features(sales):
 
 # SHOP-DATE-LEVEL FEATURES
 
-def build_shop_date_lvl_features(sales):
+def build_shop_date_lvl_features():
+    '''Build dataframe of shop-date-level features.
+
+    Returns:
+    --------
+    shop_date_level_features : pandas dataframe
+        Dataframe with each row representing a unique combination of shop_id and date and columns containing shop-date-level features
+    '''
 
     # Quantity Sold by Shop-Date
 
     # create column with quantity sold by shop-date
     shop_date_level_features = (sales.groupby(['shop_id','date'])['item_cnt_day'].sum().reset_index().rename(columns={'item_cnt_day':'shop_qty_sold_day'}))
 
+    # Add missing shop-dates (between first and last dates for each shop) with 0 values for quantity sold
+    all_shop_dates = shop_date_level_features.groupby('shop_id').date.apply(drange)
+    all_shop_dates = all_shop_dates.reset_index(level=0).reset_index(drop=True)
+    shop_date_level_features = all_shop_dates.merge(shop_date_level_features, on=['shop_id','date'], how='left')
+    shop_date_level_features.shop_qty_sold_day.fillna(0, inplace=True)
+
+    # Add missing shop-dates (between last observed sale date and last day of the training period) for shops that exist in test dataset
+    test_shops = test_df[['shop_id']].drop_duplicates().reset_index(drop=True).sort_values(by='shop_id')
+    last_shop_dts_in_train_data = shop_date_level_features.groupby('shop_id').date.max().reset_index().rename(columns={'date':'last_shop_date'})
+
+    last_shop_dts_in_train_data['last_train_dt'] = datetime.datetime(2015,11,1)
+
+    addl_dates = last_shop_dts_in_train_data.set_index('shop_id').stack().reset_index(level=1, drop=True).to_frame().rename(columns={0:'date'})
+    addl_dates = addl_dates.groupby(addl_dates.index).apply(lambda x: x.set_index('date').resample('D').asfreq())
+    addl_dates.reset_index(inplace=True)
+    addl_dates = addl_dates[addl_dates.date != datetime.datetime(2015,11,1)]
+    addl_dates = addl_dates.groupby('shop_id').apply(lambda group: group.iloc[1:, ])
+    addl_dates.reset_index(drop=True, inplace=True)
+
+    addl_dates = addl_dates.merge(test_shops, on='shop_id', how='inner')
+
+    shop_date_level_features = pd.concat([shop_date_level_features,addl_dates], axis=0, ignore_index=True)
+    shop_date_level_features.sort_values(by=['shop_id','date'], inplace=True)
+    shop_date_level_features.shop_qty_sold_day.fillna(0, inplace=True)
+
     # Last Quantity Sold by Shop-Date
 
     # create lag column for quantity sold, grouped by shop
     shifted = shop_date_level_features.groupby('shop_id').shop_qty_sold_day.shift()
     shop_date_level_features = shop_date_level_features.join(shifted.rename('shop_qty_sold_day_lag'))
+    shop_date_level_features.shop_qty_sold_day_lag.fillna(0, inplace=True)
 
     # Days Elapsed Since First Sale Date in Same Shop (Age of Shop)
 
@@ -752,113 +828,82 @@ def build_shop_date_lvl_features(sales):
     date_plus7_df.rename(columns={'shop_qty_sold_day':'shop_qty_sold_last_dow', 'date_plus7':'date'}, inplace=True)
 
     shop_date_level_features = shop_date_level_features.merge(date_plus7_df, on=['shop_id','date'], how='left')
-    # check percentage of shop-dates with missing quantity sold same day last week
-    shop_date_level_features.shop_qty_sold_last_dow.isnull().sum() / len(shop_date_level_features)
+    shop_date_level_features.shop_qty_sold_last_dow.fillna(0, inplace=True)
 
-    # check count of missing quantity values by month
-    shop_date_level_features[shop_date_level_features.shop_qty_sold_last_dow.isnull()].groupby(pd.Grouper(key='date', freq='1M')).size()
+    # Number of Days in Previous 7-Day and 30-Day Periods with a Sale
 
-    # replace missing values after January 2013 with 0's:
-    shop_date_level_features.loc[(shop_date_level_features['shop_qty_sold_last_dow'].
-                                 isnull()) & (shop_date_level_features['date'] > datetime.datetime(2013,1,31)),
-                                 'shop_qty_sold_last_dow'] = 0.
-    shop_date_level_features[shop_date_level_features.shop_qty_sold_last_dow.isnull()].groupby(pd.Grouper(key='date', freq='1M')).size()
+    shop_date_level_features['day_w_sale'] = np.where(shop_date_level_features.shop_qty_sold_day > 0, 1, 0)
 
-    # Number of Days in Previous 30-Day Period with a Sale
+    shop_date_level_features['shop_cnt_sale_dts_last_7d'] = shop_date_level_features.groupby('shop_id')['day_w_sale'].apply(lambda x: x.rolling(7, min_periods=1).sum().shift().fillna(0))
+    shop_date_level_features['shop_cnt_sale_dts_last_30d'] = shop_date_level_features.groupby('shop_id')['day_w_sale'].apply(lambda x: x.rolling(30, min_periods=1).sum().shift().fillna(0))
 
-    df_for_rolling_cts = shop_date_level_features[['shop_id','date']].set_index('date')
-
-    cnts_of_sale_dts_last_30d_by_shop = (df_for_rolling_cts.groupby('shop_id').rolling('30D').count()
-                                         .rename(columns={'shop_id':'shop_cnt_sale_dts_last_30d'}).reset_index())
-
-    shop_date_level_features = shop_date_level_features.merge(cnts_of_sale_dts_last_30d_by_shop, on=['shop_id','date'],
-                                                             how='left')
-
-    # Shop Closure-Related Columns
-
-    # create indicator column for last calendar month of operation
-
-    # step 1: identify shops that had last sale date before the last date in the training period
-
-    last_dts_by_shop = (shop_date_level_features.groupby('shop_id')['date'].max().reset_index()
-                        .rename(columns={'date':'last_date'}))
-    closed_shops = last_dts_by_shop[last_dts_by_shop.last_date < datetime.datetime(2015,10,30)].shop_id.unique()
-
-    # step 2: for each shop-date, determine if it is in the last month of observed sales for shop
-
-    # boolean series for date in last month of observed sales for shop
-    last_mon = ((12 * (shop_date_level_features.groupby('shop_id')['date'].transform('max').dt.year
-                       - shop_date_level_features['date'].dt.year)
-                 + (shop_date_level_features.groupby('shop_id')['date'].transform('max').dt.month
-                    - shop_date_level_features['date'].dt.month)) == 0)
-
-    # step 3: assign value to last_month column based on the two conditions constructed above
-
-    shop_date_level_features['last_month'] = np.where(last_mon & shop_date_level_features.shop_id.isin(closed_shops), 1, 0)
-
-    # create indicator column for second-to-last calendar month of operation
-
-    # boolean series for date in second-to-last month of observed sales for shop
-    second_to_last_mon = ((12 * (shop_date_level_features.groupby('shop_id')['date'].transform('max').dt.year
-                       - shop_date_level_features['date'].dt.year)
-                 + (shop_date_level_features.groupby('shop_id')['date'].transform('max').dt.month
-                    - shop_date_level_features['date'].dt.month)) == 1)
-
-    shop_date_level_features['second_to_last_month'] = np.where(second_to_last_mon & shop_date_level_features.shop_id.isin(closed_shops), 1, 0)
+    shop_date_level_features.drop('day_w_sale', axis=1, inplace=True)
 
     # Rolling values
-
-    df_for_rolling_cts = shop_date_level_features[['shop_id','date','shop_qty_sold_day']].set_index('date')
-
-    shop_date_level_features['shop_rolling_7d_max_qty'] = (df_for_rolling_cts.groupby('shop_id')['shop_qty_sold_day']
-                                                       .rolling("7D").max().values)
-
-    shop_date_level_features['shop_rolling_7d_min_qty'] = (df_for_rolling_cts.groupby('shop_id')['shop_qty_sold_day']
-                                                       .rolling("7D").min().values)
+    shop_date_level_features['shop_rolling_7d_max_qty'] = shop_date_level_features.groupby('shop_id')['shop_qty_sold_day'].apply(lambda x: x.rolling(7, min_periods=1).max().shift().fillna(0))
+    shop_date_level_features['shop_rolling_7d_min_qty'] = shop_date_level_features.groupby('shop_id')['shop_qty_sold_day'].apply(lambda x: x.rolling(7, min_periods=1).min().shift().fillna(0))
 
     return shop_date_level_features
 
-# SHOP-ITEM-LEVEL FEATURES
-def build_shop_item_lvl_features(sales):
-
-    # Total Quantity Sold by Shop-Item
-
-    # create column with quantity sold by shop-item
-    shop_item_level_features = (sales.groupby(['shop_id','item_id'])['item_cnt_day'].sum().reset_index().rename(columns={'item_cnt_day':'shop_item_qty_sold'}))
-
-    # Rankings of Shops by Quantity Sold for Each Item
-
-    # create column with rankings of shops by quantity sold for each item
-    ranks = shop_item_level_features.groupby('item_id')['shop_item_qty_sold'].rank('min', ascending=False)
-    shop_item_level_features = shop_item_level_features.join(ranks.rename("shop_item_qty_rank"), how='left')
-
-    # Number of Days on Which Each Shop Sold Each Item
-
-    # create column with number of days each shop sold each item
-    unique_dt_cts_by_shop_item = (sales.groupby(['shop_id','item_id'])['date'].nunique().reset_index().rename(columns={'date':'shop_item_unique_date_cts'}))
-    shop_item_level_features = shop_item_level_features.merge(unique_dt_cts_by_shop_item, on=['shop_id','item_id'],
-                                                             how='left')
-
-    return shop_item_level_features
-
 # SHOP-ITEM-DATE-LEVEL FEATURES
-def build_shop_item_date_lvl_features(sales):
+def build_shop_item_date_lvl_features():
+    '''Build dataframe of shop-item-date-level features.
+
+    Returns:
+    --------
+    shop_item_date_level_features : pandas dataframe
+        Dataframe with each row representing a unique combination of shop_id, item_id, and date and columns containing shop-item-date-level features
+    '''
 
     # Total Quantity Sold by Shop-Item-Date
 
     # create column with quantity sold by shop-item-date
     shop_item_date_level_features = (sales.groupby(['shop_id','item_id','date'])['item_cnt_day'].sum().reset_index().rename(columns={'item_cnt_day':'shop_item_qty_sold_day'}))
 
+    # Add missing shop-item-dates (between first and last dates for each shop-item) with 0 values for quantity sold
+    all_shop_item_dates = shop_item_date_level_features.groupby(['shop_id','item_id']).date.apply(drange)
+    all_shop_item_dates = all_shop_item_dates.reset_index(level=(0,1)).reset_index(drop=True)
+    shop_item_date_level_features = all_shop_item_dates.merge(shop_item_date_level_features, on=['shop_id','item_id','date'], how='left')
+    shop_item_date_level_features.shop_item_qty_sold_day.fillna(0, inplace=True)
+
+    # Add missing shop-item-dates (between last observed sale date and last day of the training period) for shop-items that exist in test dataset
+    test_shop_items = test_df[['shop_id','item_id']].drop_duplicates().reset_index(drop=True).sort_values(by=['shop_id','item_id'])
+    last_shop_item_dts_in_train_data = shop_item_date_level_features.groupby(['shop_id','item_id']).date.max().reset_index().rename(columns={'date':'last_shop_item_date'})
+
+    last_shop_item_dts_in_train_data['last_train_dt'] = datetime.datetime(2015,11,1)
+
+    addl_dates = last_shop_item_dts_in_train_data.set_index(['shop_id','item_id']).stack().reset_index(level=2, drop=True).to_frame().rename(columns={0:'date'})
+    addl_dates = addl_dates.groupby(addl_dates.index).apply(lambda x: x.set_index('date').resample('D').asfreq())
+    addl_dates.reset_index(inplace=True)
+    addl_dates['shop_id'], addl_dates['item_id'] = zip(*addl_dates.level_0)
+    addl_dates.drop('level_0', axis=1, inplace=True)
+    addl_dates = addl_dates[addl_dates.date != datetime.datetime(2015,11,1)]
+    addl_dates = addl_dates.groupby('shop_id').apply(lambda group: group.iloc[1:, ])
+    addl_dates.reset_index(drop=True, inplace=True)
+
+    addl_dates = addl_dates.merge(test_shop_items, on=['shop_id','item_id'], how='inner')
+
+    shop_item_date_level_features = pd.concat([shop_item_date_level_features,addl_dates], axis=0, ignore_index=True)
+    shop_item_date_level_features.sort_values(by=['shop_id','item_id','date'], inplace=True)
+    shop_date_level_features.shop_item_qty_sold_day.fillna(0, inplace=True)
+
     # Last Total Quantity Sold for Each Shop-Item-Date
 
     # create lag column for quantity sold, grouped by shop-item
     shifted = shop_item_date_level_features.groupby(['shop_id','item_id']).shop_item_qty_sold_day.shift()
     shop_item_date_level_features = shop_item_date_level_features.join(shifted.rename('shop_item_qty_sold_day_lag'))
+    shop_item_date_level_features.shop_item_qty_sold_day_lag.fillna(0, inplace=True)
 
     # Time Elapsed Since Previous Sale of Same Item at Same Shop
 
     # create column for time elapsed since previous sale of same item at same shop
-    shop_item_date_level_features['shop_item_days_since_prev_sale'] = (shop_item_date_level_features.groupby(['shop_id','item_id']).date.diff().dt.days)
+    shop_item_date_level_features['shop_item_last_date'] = np.where(shop_item_date_level_features.shop_item_qty_sold_day > 0, shop_item_date_level_features.date, None)
+    shop_item_date_level_features['shop_item_last_date'] = pd.to_datetime(shop_item_date_level_features.shop_item_last_date)
+    shop_item_date_level_features['shop_item_last_date'] = shop_item_date_level_features.shop_item_last_date.fillna(method='ffill').shift()
+    shop_item_date_level_features.loc[shop_item_date_level_features.groupby(['shop_id','item_id'])['shop_item_last_date'].head(1).index, 'shop_item_last_date'] = pd.NaT
+    shop_item_date_level_features['shop_item_days_since_prev_sale'] = shop_item_date_level_features.date.sub(shop_item_date_level_features.shop_item_last_date).dt.days
+    shop_item_date_level_features.shop_item_days_since_prev_sale.fillna(0, inplace=True)
+    shop_item_date_level_features.drop('shop_item_last_date', axis=1, inplace=True)
 
     # Time Elapsed Since First Sale Date of Same Item at Same Shop
 
@@ -872,69 +917,41 @@ def build_shop_item_date_lvl_features(sales):
     # create indicator column for first month of sale of item at shop
     shop_item_date_level_features['shop_item_first_month'] = ((shop_item_date_level_features['shop_item_days_since_first_sale'] <= 30).astype(np.int8))
 
-    # Number of Days in Previous 30-Day Period with a Sale
+    # Number of Days in Previous 7-Day and 30-Day Periods with a Sale
 
-    df_for_rolling_cts = shop_item_date_level_features[['shop_id','item_id','date']].set_index('date')
+    shop_item_date_level_features['day_w_sale'] = np.where(shop_item_date_level_features.shop_item_qty_sold_day > 0, 1, 0)
 
-    cnts_of_sale_dts_last_30d_by_shop_item = (df_for_rolling_cts.groupby(['shop_id','item_id'])
-                                              .rolling('30D')
-                                              .count()
-                                              .drop(columns=['item_id'])
-                                              .rename(columns={'shop_id':'shop_item_cnt_sale_dts_last_30d'})
-                                              .reset_index())
+    shop_item_date_level_features['shop_item_cnt_sale_dts_last_7d'] = shop_item_date_level_features.groupby(['shop_id','item_id'])['day_w_sale'].apply(lambda x: x.rolling(7, min_periods=1).sum().shift().fillna(0))
+    shop_item_date_level_features['shop_item_cnt_sale_dts_last_30d'] = shop_item_date_level_features.groupby(['shop_id','item_id'])['day_w_sale'].apply(lambda x: x.rolling(30, min_periods=1).sum().shift().fillna(0))
 
-    shop_item_date_level_features = (shop_item_date_level_features
-                                     .merge(cnts_of_sale_dts_last_30d_by_shop_item, on=['shop_id','item_id','date'], how='left'))
+    shop_item_date_level_features.drop('day_w_sale', axis=1, inplace=True)
 
-    # Expanding Max and Min Quantity Values
+    # Expanding Max, Min and Mean Quantity Values
 
     shop_item_date_level_features['shop_item_expand_qty_max'] = (shop_item_date_level_features
                                                              .groupby(['shop_id','item_id'])['shop_item_qty_sold_day']
-                                                             .expanding().max().values)
+                                                             .apply(lambda x: x.expanding().max().shift().bfill()))
 
     shop_item_date_level_features['shop_item_expand_qty_min'] = (shop_item_date_level_features
                                                              .groupby(['shop_id','item_id'])['shop_item_qty_sold_day']
-                                                             .expanding().min().values)
+                                                             .apply(lambda x: x.expanding().min().shift().bfill()))
+
+    shop_item_date_level_features['shop_item_expand_qty_mean'] = (shop_item_date_level_features
+                                                             .groupby(['shop_id','item_id'])['shop_item_qty_sold_day']
+                                                             .apply(lambda x: x.expanding().mean().shift().bfill()))
 
     # Quantity Sold 1, 2, 3 Days Ago
 
-    df_for_date_replacement = (shop_item_date_level_features[['shop_id','item_id','date','shop_item_qty_sold_day']]
-                               .rename(columns={'shop_item_qty_sold_day':'shop_item_qty_sold_1d_ago'}))
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    shop_item_date_level_features = shop_item_date_level_features.merge(df_for_date_replacement, on=['shop_id','item_id','date'], how='left')
+    shop_item_date_level_features['shop_item_qty_sold_1d_ago'] = shop_item_date_level_features.groupby(['shop_id','item_id')['shop_item_qty_sold_day'].shift()
     shop_item_date_level_features.shop_item_qty_sold_1d_ago.fillna(0, inplace=True)
 
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    df_for_date_replacement.rename(columns={'shop_item_qty_sold_1d_ago':'shop_item_qty_sold_2d_ago'}, inplace=True)
-    shop_item_date_level_features = shop_item_date_level_features.merge(df_for_date_replacement, on=['shop_id','item_id','date'], how='left')
+    shop_item_date_level_features['shop_item_qty_sold_2d_ago'] = shop_item_date_level_features.groupby(['shop_id','item_id')['shop_item_qty_sold_day'].shift(2)
     shop_item_date_level_features.shop_item_qty_sold_2d_ago.fillna(0, inplace=True)
 
-    df_for_date_replacement['date'] = df_for_date_replacement.date + datetime.timedelta(days=1)
-    df_for_date_replacement.rename(columns={'shop_item_qty_sold_2d_ago':'shop_item_qty_sold_3d_ago'}, inplace=True)
-    shop_item_date_level_features = shop_item_date_level_features.merge(df_for_date_replacement, on=['shop_id','item_id','date'], how='left')
+    shop_item_date_level_features['shop_item_qty_sold_3d_ago'] = shop_item_date_level_features.groupby(['shop_id','item_id')['shop_item_qty_sold_day'].shift(3)
     shop_item_date_level_features.shop_item_qty_sold_3d_ago.fillna(0, inplace=True)
 
     return shop_item_date_level_features
-
-# MERGE ALL DATASETS INTO ONE
-
-# Rename columns in each dataset for easy identification by adding a prefix to column names
-
-cols_not_to_rename = ['shop_id', 'item_id', 'date']
-shops_df.columns = ['s_'+col if ((col not in cols_not_to_rename) & (~col.startswith('s_')))
-                                 else col for col in shops_df.columns]
-item_level_features.columns = ['i_'+col if ((col not in cols_not_to_rename) & (~col.startswith('i_')))
-                               else col for col in item_level_features.columns]
-date_level_features.columns = ['d_'+col if ((col not in cols_not_to_rename) & (~col.startswith('d_')))
-                               else col for col in date_level_features.columns]
-item_date_level_features.columns = ['id_'+col if ((col not in cols_not_to_rename) & (~col.startswith('id_')))
-                                    else col for col in item_date_level_features.columns]
-shop_date_level_features.columns = ['sd_'+col if ((col not in cols_not_to_rename) & (~col.startswith('sd_')))
-                                    else col for col in shop_date_level_features.columns]
-shop_item_level_features.columns = ['si_'+col if ((col not in cols_not_to_rename) & (~col.startswith('si_')))
-                                    else col for col in shop_item_level_features.columns]
-shop_item_date_level_features.columns = ['sid_'+col if ((col not in cols_not_to_rename) & (~col.startswith('sid_')))
-                                         else col for col in shop_item_date_level_features.columns]
 
 # Downcast Numeric Columns to Reduce Memory Usage
 # from https://hackersandslackers.com/downcast-numerical-columns-python-pandas/
@@ -995,28 +1012,6 @@ def downcast(df_in):
           target_type = "unsigned",
           inital_type = "integer"))
 
-shops_df = downcast(shops_df)
-item_level_features = downcast(item_level_features)
-date_level_features = downcast(date_level_features)
-item_date_level_features = downcast(item_date_level_features)
-shop_date_level_features = downcast(shop_date_level_features)
-shop_item_level_features = downcast(shop_item_level_features)
-shop_item_date_level_features = downcast(shop_item_date_level_features)
-
-# Merge All Dataframes Into One
-
-all_features = shop_item_date_level_features.merge(shops_df, on='shop_id', how='inner')
-all_features = all_features.merge(item_level_features, on='item_id', how='inner')
-all_features = all_features.merge(date_level_features, on='date', how='inner')
-all_features = all_features.merge(item_date_level_features, on=['item_id','date'], how='inner')
-all_features = all_features.merge(shop_date_level_features, on=['shop_id','date'], how='inner')
-all_features = all_features.merge(shop_item_level_features, on=['shop_id','item_id'], how='inner')
-
-all_features.to_pickle('../../../../../Volumes/My Passport/all_features_v3.pkl')
-# all_features.to_pickle('./Data/competitive-data-science-predict-future-sales/all_features.pkl')
-
-del all_features
-
 def main():
     # Load data
     data_path = './Data/competitive-data-science-predict-future-sales/'
@@ -1032,9 +1027,51 @@ def main():
     ps4games = pd.read_csv(data_path + 'ps4_games.csv', usecols=usecols)
 
     # next step
-    sales = clean_sales_data(sales)
-    shops_df = build_shop_lvl_features(shops_df)
-    items_df = build_item_lvl_features(sales)
+    sales = clean_sales_data()
+    shops_df = build_shop_lvl_features()
+    item_level_features = build_item_lvl_features()
+    date_level_features = build_date_lvl_features()
+    item_date_level_features = build_item_date_lvl_features()
+    shop_date_level_features = build_shop_date_lvl_features()
+    shop_item_date_level_features = build_shop_item_date_lvl_features()
+
+    shops_df = downcast(shops_df)
+    item_level_features = downcast(item_level_features)
+    date_level_features = downcast(date_level_features)
+    item_date_level_features = downcast(item_date_level_features)
+    shop_date_level_features = downcast(shop_date_level_features)
+    shop_item_date_level_features = downcast(shop_item_date_level_features)
+
+    # MERGE ALL DATASETS INTO ONE
+
+    # Rename columns in each dataset for easy identification by adding a prefix to column names
+
+    cols_not_to_rename = ['shop_id', 'item_id', 'date']
+    shops_df.columns = ['s_'+col if ((col not in cols_not_to_rename) & (~col.startswith('s_')))
+                                     else col for col in shops_df.columns]
+    item_level_features.columns = ['i_'+col if ((col not in cols_not_to_rename) & (~col.startswith('i_')))
+                                   else col for col in item_level_features.columns]
+    date_level_features.columns = ['d_'+col if ((col not in cols_not_to_rename) & (~col.startswith('d_')))
+                                   else col for col in date_level_features.columns]
+    item_date_level_features.columns = ['id_'+col if ((col not in cols_not_to_rename) & (~col.startswith('id_')))
+                                        else col for col in item_date_level_features.columns]
+    shop_date_level_features.columns = ['sd_'+col if ((col not in cols_not_to_rename) & (~col.startswith('sd_')))
+                                        else col for col in shop_date_level_features.columns]
+    shop_item_date_level_features.columns = ['sid_'+col if ((col not in cols_not_to_rename) & (~col.startswith('sid_')))
+                                             else col for col in shop_item_date_level_features.columns]
+
+    # Merge All Dataframes Into One
+
+    all_features = shop_item_date_level_features.merge(shops_df, on='shop_id', how='inner')
+    all_features = all_features.merge(item_level_features, on='item_id', how='inner')
+    all_features = all_features.merge(date_level_features, on='date', how='inner')
+    all_features = all_features.merge(item_date_level_features, on=['item_id','date'], how='inner')
+    all_features = all_features.merge(shop_date_level_features, on=['shop_id','date'], how='inner')
+
+    all_features.to_pickle('../../../../../Volumes/My Passport/all_features_v3.pkl')
+    # all_features.to_pickle('./Data/competitive-data-science-predict-future-sales/all_features.pkl')
+
+    del all_features
 
 if __name__ == '__main__':
     main()
