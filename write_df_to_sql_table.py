@@ -40,7 +40,39 @@ def psql_insert_copy(table, conn, keys, data_iter):
         cur.copy_expert(sql=sql, file=s_buf)
 
 
+def chunker(seq, size):
+    '''Create chunks (subsets) of specified size from input sequence.
+
+    Parameters:
+    -----------
+    seq : sequence/collection (e.g., string, list, dictionary, dataframe)
+        Sequence/collection that needs to be split into chunks
+    size : int
+        Size of individual chunks
+
+    Returns:
+    --------
+    generator expression for chunks of specified size (the last chunk may be
+    smaller than value of size parameter)
+    '''
+    return (seq[pos:pos + size] for pos in range(0, len(seq), size))
+
+
 def write_df_to_sql(df, table_name):
+    '''Write pandas DataFrame object to PostgreSQL table, while displaying
+    progress bar. Rows will be written in chunks of up to 10,000 rows max.
+
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        Dataframe to be written to SQL table
+    table_name : str
+        Name of SQL table to write to
+
+    Returns:
+    --------
+    None
+    '''
 
     # Create dictionary of database configuration details
     db_details = config(section="postgresql")
@@ -64,6 +96,17 @@ def write_df_to_sql(df, table_name):
         + dbase
     )
 
-    df.to_sql(
-        table_name, engine, chunksize=1000, if_exists="replace", method=psql_insert_copy
-    )
+    # write DF to SQL table with progress bar displayed
+    # per https://stackoverflow.com/a/39495229/9987623
+    chunksize = max(int(len(df) / 100), 10000)
+    with tqdm(total=len(df)) as pbar:
+        for i, cdf in enumerate(chunker(df, chunksize)):
+            replace = "replace" if i == 0 else "append"
+            cdf.to_sql(
+                table_name,
+                engine,
+                if_exists=replace,
+                index=False,
+                method=psql_insert_copy
+            )
+            pbar.update(chunksize)

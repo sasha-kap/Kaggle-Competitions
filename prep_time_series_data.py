@@ -26,6 +26,7 @@ import warnings
 import numpy as np
 import pandas as pd
 from scipy.stats import variation, mode
+from tqdm import tqdm
 
 # Local imports
 from constants import (
