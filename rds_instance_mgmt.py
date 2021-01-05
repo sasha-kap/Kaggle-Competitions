@@ -23,7 +23,9 @@ from botocore.exceptions import ClientError
 from config import config
 
 def create_instance():
+    '''Create RDS instance with PostgreSQL database and specified configuration.'''
 
+    # Create dictionaries of instance and database configuration details
     rds_instance = config(section="rds")
     db_details = config(section="postgresql")
 
@@ -84,6 +86,7 @@ def create_instance():
 
 
 def stop_instance():
+    '''Stop active RDS instance.'''
 
     rds_instance = config(section="rds")
     rds = boto3.client("rds", region_name=rds_instance["region"])
@@ -116,12 +119,12 @@ def stop_instance():
             stopping = False
 
 def start_instance():
+    '''Start previously stopped RDS instance.'''
 
     rds_instance = config(section="rds")
     rds = boto3.client("rds", region_name=rds_instance["region"])
     try:
         response = rds.start_db_instance(DBInstanceIdentifier=rds_instance["instance_id"])
-        print("Instance started successfully")
     except ClientError as e:
         print(e)
 
