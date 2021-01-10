@@ -159,6 +159,11 @@ def clean_sales_data(return_df=False, to_sql=False):
     # remove row with negative price
     sales = sales[sales.item_price > 0.0]
 
+    # sort the dataset
+    sales.sort_values(
+        by=["shop_id", "item_id", "date"], inplace=True, ignore_index=True
+    )
+
     # save DF to file
     sales.to_csv("sales_cleaned.csv", index=False)
 
@@ -404,24 +409,16 @@ def build_item_lvl_features(return_df=False, to_sql=False):
     cleaned_sales_file = Path("sales_cleaned.csv")
     if cleaned_sales_file.is_file():
         sales = pd.read_csv("sales_cleaned.csv")
+        sales["date"] = pd.to_datetime(sales.date)
     else:
         sales = clean_sales_data(return_df=True)
 
-    # Coefficient of Variation of Price
-
-    # Calculate the coefficient of variation of price for each item separately
+    # Column of all unique item_ids
     item_level_features = (
-        sales.groupby("item_id")["item_price"]
-        .agg(variation)
-        .reset_index()
-        .rename(columns={"item_price": "coef_var_price"})
-    )
-
-    # Mean Absolute Deviation of Quantity Sold
-
-    # Calculate the mean absolute deviation of quantity sold for each item
-    item_level_features["quant_mean_abs_dev"] = (
-        sales.groupby("item_id")["item_cnt_day"].mad().values
+        sales[["item_id"]]
+        .drop_duplicates()
+        .sort_values(by="item_id")
+        .reset_index(drop=True)
     )
 
     # Item Name, Category ID, Category Name
@@ -451,19 +448,6 @@ def build_item_lvl_features(return_df=False, to_sql=False):
         | (item_level_features.item_category_name.str.contains("MP3")),
         1,
         0,
-    )
-
-    # Number of Shops That Sold the Item
-
-    # create column for number of shops that sold the item
-    item_n_shops_selling = (
-        sales.groupby("item_id")
-        .shop_id.nunique()
-        .reset_index()
-        .rename(columns={"shop_id": "item_unique_shop_cts"})
-    )
-    item_level_features = item_level_features.merge(
-        item_n_shops_selling, on="item_id", how="left"
     )
 
     # Number of Unique Days on Which Item Was Sold
@@ -927,6 +911,32 @@ def drange(date_ser):
     return pd.Series(pd.date_range(s, e))
 
 
+def lag_merge_asof(df, lag):
+    """Compute number of unique shop_id values over all prior dates up to the
+    date 'lag' days before current date (inclusive).
+
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        Dataframe at item-date-shop level with item_id, date and shop_id
+        columns and sorted by item_id, date.
+    lag : int
+        Number of days before current date at which to end lookback window.
+        Example: If lag=1, number of unique values is calculated across all dates
+        before (i.e., not including) current date.
+
+    Returns:
+    --------
+    Original datafrae with a column added for number of unique shop_id values
+    and with that column containing null values for item-dates for which
+    no lookback period could be constructed given the data.
+    """
+    d = df.set_index("date")["shop_id"].expanding().apply(lambda x: len(set(x)))
+    d.index = d.index + pd.offsets.Day(lag)
+    d = d.reset_index(name="num_unique_shops_prior_to_day")
+    return pd.merge_asof(df, d)
+
+
 def build_item_date_lvl_features(return_df=False, to_sql=False):
     """Build dataframe of item-date-level features.
 
@@ -946,6 +956,7 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     cleaned_sales_file = Path("sales_cleaned.csv")
     if cleaned_sales_file.is_file():
         sales = pd.read_csv("sales_cleaned.csv")
+        sales["date"] = pd.to_datetime(sales.date)
     else:
         sales = clean_sales_data(return_df=True)
 
@@ -971,8 +982,8 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     test_items = (
         test_df[["item_id"]]
         .drop_duplicates()
-        .reset_index(drop=True)
         .sort_values(by="item_id")
+        .reset_index(drop=True)
     )
     last_item_dts_in_train_data = (
         item_date_level_features.groupby("item_id")
@@ -1007,7 +1018,9 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features = pd.concat(
         [item_date_level_features, addl_dates], axis=0, ignore_index=True
     )
-    item_date_level_features.sort_values(by=["item_id", "date"], inplace=True)
+    item_date_level_features.sort_values(
+        by=["item_id", "date"], inplace=True, ignore_index=True
+    )
     item_date_level_features.item_qty_sold_day.fillna(0, inplace=True)
 
     # Previous Non-Zero Quantity Sold
@@ -1173,7 +1186,9 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     non_zero_qty_item_dates = pd.concat(
         [non_zero_qty_item_dates, last_date_per_item], axis=0, ignore_index=True
     )
-    non_zero_qty_item_dates.sort_values(by=["item_id", "date"], inplace=True)
+    non_zero_qty_item_dates.sort_values(
+        by=["item_id", "date"], inplace=True, ignore_index=True
+    )
     non_zero_qty_item_dates["item_date_diff_bw_last_and_prev_qty"] = (
         non_zero_qty_item_dates.groupby("item_id")
         .item_qty_sold_day.diff(periods=2)
@@ -1297,6 +1312,32 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         .replace(np.inf, 0)
     )
 
+    # Number of Unique Shops That Sold the Item Prior to Current Day
+
+    sales_sorted = sales[["shop_id", "item_id", "date"]].sort_values(
+        by=["item_id", "date"], ignore_index=True
+    )
+
+    item_dates_w_shop_cts = sales_sorted[["shop_id", "date"]]
+    item_dates_w_shop_cts.index = [
+        sales_sorted.item_id,
+        sales_sorted.groupby("item_id").cumcount().rename("iidx"),
+    ]
+
+    item_dates_w_shop_cts = (
+        item_dates_w_shop_cts.groupby(level="item_id")
+        .apply(lag_merge_asof, lag=1)
+        .reset_index("item_id")
+        .reset_index(drop=True)
+    )
+    item_dates_w_shop_cts.drop_duplicates(subset=["item_id", "date"], inplace=True)
+    item_dates_w_shop_cts.num_unique_shops_prior_to_day.fillna(0, inplace=True)
+    item_dates_w_shop_cts.drop("shop_id", axis=1, inplace=True)
+
+    item_date_level_features = item_date_level_features.merge(
+        item_dates_w_shop_cts, on=["item_id", "date"], how="left"
+    )
+
     item_date_level_features = downcast(item_date_level_features)
     item_date_level_features = add_col_prefix(item_date_level_features, "id_")
 
@@ -1327,6 +1368,7 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
     cleaned_sales_file = Path("sales_cleaned.csv")
     if cleaned_sales_file.is_file():
         sales = pd.read_csv("sales_cleaned.csv")
+        sales["date"] = pd.to_datetime(sales.date)
     else:
         sales = clean_sales_data(return_df=True)
 
@@ -1352,8 +1394,8 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
     test_shops = (
         test_df[["shop_id"]]
         .drop_duplicates()
-        .reset_index(drop=True)
         .sort_values(by="shop_id")
+        .reset_index(drop=True)
     )
     last_shop_dts_in_train_data = (
         shop_date_level_features.groupby("shop_id")
@@ -1388,7 +1430,9 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
     shop_date_level_features = pd.concat(
         [shop_date_level_features, addl_dates], axis=0, ignore_index=True
     )
-    shop_date_level_features.sort_values(by=["shop_id", "date"], inplace=True)
+    shop_date_level_features.sort_values(
+        by=["shop_id", "date"], inplace=True, ignore_index=True
+    )
     shop_date_level_features.shop_qty_sold_day.fillna(0, inplace=True)
 
     # Last Quantity Sold by Shop-Date
@@ -1501,6 +1545,23 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         return shop_date_level_features
 
 
+def mad(data, axis=None):
+    """Calculate mean absolute deviation of array.
+
+    Parameters:
+    -----------
+    data : array-like
+        Array of values on which to run the function
+    axis : int (or None)
+        Array axis on which to run the function
+
+    Returns:
+    --------
+    Expression for mean absolute deviation
+    """
+    return np.mean(np.absolute(data - np.mean(data, axis)), axis)
+
+
 # SHOP-ITEM-DATE-LEVEL FEATURES
 def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     """Build dataframe of shop-item-date-level features.
@@ -1521,6 +1582,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     cleaned_sales_file = Path("sales_cleaned.csv")
     if cleaned_sales_file.is_file():
         sales = pd.read_csv("sales_cleaned.csv")
+        sales["date"] = pd.to_datetime(sales.date)
     else:
         sales = clean_sales_data(return_df=True)
 
@@ -1550,8 +1612,8 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     test_shop_items = (
         test_df[["shop_id", "item_id"]]
         .drop_duplicates()
-        .reset_index(drop=True)
         .sort_values(by=["shop_id", "item_id"])
+        .reset_index(drop=True)
     )
     last_shop_item_dts_in_train_data = (
         shop_item_date_level_features.groupby(["shop_id", "item_id"])
@@ -1591,7 +1653,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         [shop_item_date_level_features, addl_dates], axis=0, ignore_index=True
     )
     shop_item_date_level_features.sort_values(
-        by=["shop_id", "item_id", "date"], inplace=True
+        by=["shop_id", "item_id", "date"], inplace=True, ignore_index=True
     )
     shop_date_level_features.shop_item_qty_sold_day.fillna(0, inplace=True)
 
@@ -1679,6 +1741,18 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     )
 
     shop_item_date_level_features.drop("day_w_sale", axis=1, inplace=True)
+
+    # Expanding Coefficient of Variation of item price (across all shop-items before current date)
+
+    shop_item_date_level_features["coef_var_price"] = sales.groupby(
+        ["shop_id", "item_id"]
+    )["item_price"].apply(lambda x: x.expanding().agg(variation).shift().bfill())
+
+    # Expanding Mean Absolute Deviation of Quantity Sold (across all shop-items before current date)
+
+    shop_item_date_level_features["quant_mean_abs_dev"] = sales.groupby(
+        ["shop_id", "item_id"]
+    )["item_cnt_day"].apply(lambda x: x.expanding().agg(mad).shift().bfill())
 
     # Expanding Max, Min and Mean Quantity Values
 
