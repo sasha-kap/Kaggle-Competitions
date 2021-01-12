@@ -203,7 +203,7 @@ def add_col_prefix(df, prefix, cols_not_to_rename=["shop_id", "item_id", "date"]
 
 # SHOP-LEVEL FEATURES
 def lat_lon_to_float(
-    in_coord, degree_sign=u"\N{DEGREE SIGN}", remove=degree_sign + "′" + "″"
+    in_coord, degree_sign="\N{DEGREE SIGN}", remove=degree_sign + "′" + "″"
 ):
     """Convert latitude-longitude text string into latitude and longitude floats.
 
@@ -448,103 +448,6 @@ def build_item_lvl_features(return_df=False, to_sql=False):
         | (item_level_features.item_category_name.str.contains("MP3")),
         1,
         0,
-    )
-
-    # Number of Unique Days on Which Item Was Sold
-
-    # create column for number of unique days on which item was sold
-    item_n_days_sold = (
-        sales.groupby("item_id")["date"]
-        .nunique()
-        .reset_index()
-        .rename(columns={"date": "item_unique_date_cts"})
-    )
-    item_level_features = item_level_features.merge(
-        item_n_days_sold, on="item_id", how="left"
-    )
-
-    # Values Summarizing Number of Days Between Sale of Item
-
-    item_dates = (
-        sales[["item_id", "date"]]
-        .drop_duplicates(subset=["item_id", "date"])
-        .sort_values(by=["item_id", "date"])
-        .reset_index(drop=True)
-    )
-
-    # create column for time elapsed since previous sale of same item
-    item_dates["days_since_prev_sale"] = (
-        item_dates.groupby("item_id").date.diff().dt.days
-    )
-
-    item_gap_bw_days_stats = (
-        item_dates.groupby("item_id")
-        .agg(
-            item_gap_days_mean=("days_since_prev_sale", np.mean),
-            item_gap_days_std=("days_since_prev_sale", std_funct),
-            item_gap_days_median=("days_since_prev_sale", np.median),
-            item_gap_days_min=("days_since_prev_sale", np.min),
-            item_gap_days_max=("days_since_prev_sale", np.max),
-        )
-        .reset_index()
-    )
-
-    item_level_features = item_level_features.merge(
-        item_gap_bw_days_stats, on="item_id", how="left"
-    )
-
-    # Total Number of Items in Category That Includes the Item
-
-    # add column for number of items in each category, with the number assigned to each item in that category
-    item_level_features["item_total_items_in_cat"] = item_level_features.groupby(
-        "item_category_id"
-    ).item_id.transform("count")
-
-    # Presence of Spikes in Quantity Sold
-
-    # add column for item having a spike in quantity sold at day level
-    items_w_spike = sales[
-        sales.item_cnt_day
-        > (
-            sales.groupby("item_id").item_cnt_day.transform("mean")
-            + 2 * sales.groupby("item_id").item_cnt_day.transform("std", ddof=0)
-        )
-    ].item_id.unique()
-    item_level_features["item_had_qty_spike"] = np.where(
-        item_level_features.item_id.isin(items_w_spike), 1, 0
-    )
-
-    # add column for number of spikes in quantity sold at day level
-    n_spikes_by_item = (
-        sales[
-            sales.item_cnt_day
-            > (
-                sales.groupby("item_id").item_cnt_day.transform("mean")
-                + 2 * sales.groupby("item_id").item_cnt_day.transform("std", ddof=0)
-            )
-        ]
-        .groupby("item_id")
-        .size()
-        .reset_index()
-        .rename(columns={0: "item_n_spikes"})
-    )
-    item_level_features = item_level_features.merge(
-        n_spikes_by_item, on="item_id", how="left"
-    )
-    item_level_features.item_n_spikes.fillna(0, inplace=True)
-
-    # add indicator column for item having a spike when the item just went on sale
-    qty_spiked = sales.item_cnt_day > (
-        sales.groupby("item_id").item_cnt_day.transform("mean")
-        + 2 * sales.groupby("item_id").item_cnt_day.transform("std", ddof=0)
-    )
-    first_week = (sales.date - sales.groupby("item_id").date.min()).astype(
-        "timedelta64[D]"
-    ) <= 7.0
-
-    items_w_early_spike = sales[qty_spiked & first_week].item_id.unique()
-    item_level_features["item_had_early_spike"] = np.where(
-        item_level_features.item_id.isin(items_w_early_spike), 1, 0
     )
 
     # Indicator of Month of Year When Item Was First Sold
@@ -870,15 +773,10 @@ def build_date_lvl_features(return_df=False, to_sql=False):
     )
 
     # create columns for 1-day, 6-day and 7-day lagged total quantity sold
-    date_level_features[
-        "day_total_qty_sold_1day_lag"
-    ] = date_level_features.day_total_qty_sold.shift(1)
-    date_level_features[
-        "day_total_qty_sold_6day_lag"
-    ] = date_level_features.day_total_qty_sold.shift(6)
-    date_level_features[
-        "day_total_qty_sold_7day_lag"
-    ] = date_level_features.day_total_qty_sold.shift(7)
+    for shift_val in [1, 6, 7]:
+        date_level_features[
+            f"day_total_qty_sold_{shift_val}day_lag"
+        ] = date_level_features.day_total_qty_sold.shift(shift_val)
 
     # create column for 1-day lagged brent price (based on the results of cross-correlation analysis above)
     date_level_features["brent_1day_lag"] = date_level_features.brent.shift(1)
@@ -927,7 +825,7 @@ def lag_merge_asof(df, lag):
 
     Returns:
     --------
-    Original datafrae with a column added for number of unique shop_id values
+    Original dataframe with a column added for number of unique shop_id values
     and with that column containing null values for item-dates for which
     no lookback period could be constructed given the data.
     """
@@ -1152,6 +1050,7 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features.item_qty_sold_3d_ago.fillna(0, inplace=True)
 
     # Longest Time Interval Between Sales of Items Up to (and Not Including) Current Date
+    # Also, shortest, mean, median, and standard deviation
 
     item_date_level_features["item_days_since_prev_sale_lmtd"] = np.where(
         item_date_level_features.item_qty_sold_day > 0,
@@ -1164,6 +1063,34 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         "item_days_since_prev_sale_lmtd"
     ].apply(
         lambda x: x.expanding().max().shift().bfill()
+    )
+    item_date_level_features[
+        "item_date_min_gap_bw_sales"
+    ] = item_date_level_features.groupby("item_id")[
+        "item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().min().shift().bfill()
+    )
+    item_date_level_features[
+        "item_date_avg_gap_bw_sales"
+    ] = item_date_level_features.groupby("item_id")[
+        "item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().mean().shift().bfill()
+    )
+    item_date_level_features[
+        "item_date_median_gap_bw_sales"
+    ] = item_date_level_features.groupby("item_id")[
+        "item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().median().shift().bfill()
+    )
+    item_date_level_features[
+        "item_date_std_gap_bw_sales"
+    ] = item_date_level_features.groupby("item_id")[
+        "item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().std(ddof=0).shift().bfill()
     )
     item_date_level_features.drop(
         "item_days_since_prev_sale_lmtd", axis=1, inplace=True
@@ -1337,6 +1264,43 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features = item_date_level_features.merge(
         item_dates_w_shop_cts, on=["item_id", "date"], how="left"
     )
+
+    # Number of Unique Days on Which Item Was Sold Since the Beginning of the Train Period
+    # (not including the current day)
+
+    item_date_level_features["item_unique_date_cts_before_day"] = (
+        item_date_level_features.groupby("item_id")["date"]
+        .apply(lambda x: x.expanding().agg(lambda x: len(set(x))).shift().fillna(0))
+        .astype(np.int8)
+    )
+
+    # Presence of Spikes in Quantity Sold
+
+    # column indicating whether item had a spike in quantity sold before current day
+    res = (
+        item_date_level_features.groupby("item_id")["item_qty_sold_day"]
+        .expanding()
+        .apply(
+            lambda x: any(
+                (v > (np.median(x[:-1]) + 2 * np.std(x[:-1]))) for v in x[:-1]
+            ),
+            raw=True,
+        )
+    )
+    item_date_level_features["item_had_spike_before_day"] = np.where(res == 1, 1, 0)
+
+    # column with count of spikes in quantity sold before current day
+    res = (
+        item_date_level_features.groupby("item_id")["item_qty_sold_day"]
+        .expanding()
+        .apply(
+            lambda x: sum(
+                (v > (np.median(x[:-1]) + 2 * np.std(x[:-1]))) for v in x[:-1]
+            ),
+            raw=True,
+        )
+    ).reset_index(level=0, drop=True)
+    item_date_level_features["item_had_spike_before_day"] = res
 
     item_date_level_features = downcast(item_date_level_features)
     item_date_level_features = add_col_prefix(item_date_level_features, "id_")
