@@ -980,32 +980,7 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         item_date_level_features["item_days_since_first_sale"] <= 30
     ).astype(np.int8)
 
-    # Monthly Quantity Summary Values by Item
-
-    item_date_level_features["yr_mon"] = (
-        item_date_level_features["date"]
-        + pd.offsets.MonthEnd(n=0)
-        - pd.offsets.MonthBegin(n=1)
-    )
-    item_month_qty_stats = (
-        item_date_level_features.groupby(["item_id", "yr_mon"])
-        .agg(
-            item_month_qty_mean=("item_qty_sold_day", np.mean),
-            item_month_qty_std=("item_qty_sold_day", std_funct),
-            item_month_qty_median=("item_qty_sold_day", np.median),
-            item_month_qty_min=("item_qty_sold_day", np.min),
-            item_month_qty_max=("item_qty_sold_day", np.max),
-        )
-        .reset_index()
-    )
-
-    item_date_level_features = item_date_level_features.merge(
-        item_month_qty_stats, on=["item_id", "yr_mon"], how="left"
-    )
-
-    item_date_level_features.drop(columns=["yr_mon"], inplace=True)
-
-    # Rolling 7-day min and max quantity values, excluding current day except for first item-date
+    # Rolling 7-day min, max and mean quantity values, excluding current day except for first item-date
 
     item_date_level_features[
         "item_rolling_7d_max_qty"
@@ -1016,6 +991,11 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         "item_rolling_7d_min_qty"
     ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].apply(
         lambda x: x.rolling(7, 1).min().shift().bfill()
+    )
+    item_date_level_features[
+        "item_rolling_7d_avg_qty"
+    ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].apply(
+        lambda x: x.rolling(7, 1).mean().shift().bfill()
     )
 
     # Expanding Max, Min, Mean Quantity Values
@@ -1282,7 +1262,19 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         .expanding()
         .apply(
             lambda x: any(
-                (v > (np.median(x[:-1]) + 2 * np.std(x[:-1]))) for v in x[:-1]
+                (
+                    v
+                    > (
+                        np.nanmedian(
+                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
+                        )
+                        + 2
+                        * np.nanstd(
+                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
+                        )
+                    )
+                )
+                for v in x[:-1]
             ),
             raw=True,
         )
@@ -1290,12 +1282,25 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features["item_had_spike_before_day"] = np.where(res == 1, 1, 0)
 
     # column with count of spikes in quantity sold before current day
+
     res = (
         item_date_level_features.groupby("item_id")["item_qty_sold_day"]
         .expanding()
         .apply(
             lambda x: sum(
-                (v > (np.median(x[:-1]) + 2 * np.std(x[:-1]))) for v in x[:-1]
+                (
+                    v
+                    > (
+                        np.nanmedian(
+                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
+                        )
+                        + 2
+                        * np.nanstd(
+                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
+                        )
+                    )
+                )
+                for v in x[:-1]
             ),
             raw=True,
         )
@@ -1427,31 +1432,6 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         shop_date_level_features["shop_days_since_first_sale"] <= 30
     ).astype(np.int8)
 
-    # Monthly Quantity Summary Values by Shop
-
-    shop_date_level_features["yr_mon"] = (
-        shop_date_level_features["date"]
-        + pd.offsets.MonthEnd(n=0)
-        - pd.offsets.MonthBegin(1)
-    )
-    shop_month_qty_stats = (
-        shop_date_level_features.groupby(["shop_id", "yr_mon"])
-        .agg(
-            shop_month_qty_mean=("shop_qty_sold_day", np.mean),
-            shop_month_qty_std=("shop_qty_sold_day", std_funct),
-            shop_month_qty_median=("shop_qty_sold_day", np.median),
-            shop_month_qty_min=("shop_qty_sold_day", np.min),
-            shop_month_qty_max=("shop_qty_sold_day", np.max),
-        )
-        .reset_index()
-    )
-
-    shop_date_level_features = shop_date_level_features.merge(
-        shop_month_qty_stats, on=["shop_id", "yr_mon"], how="left"
-    )
-
-    shop_date_level_features.drop(columns=["yr_mon"], inplace=True)
-
     # Quantity Sold Same Day Previous Week
 
     date_plus7_df = shop_date_level_features[["shop_id", "date", "shop_qty_sold_day"]]
@@ -1497,6 +1477,11 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         "shop_rolling_7d_min_qty"
     ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
         lambda x: x.rolling(7, min_periods=1).min().shift().fillna(0)
+    )
+    shop_date_level_features[
+        "shop_rolling_7d_mean_qty"
+    ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
+        lambda x: x.rolling(7, min_periods=1).mean().shift().fillna(0)
     )
 
     shop_date_level_features = downcast(shop_date_level_features)
