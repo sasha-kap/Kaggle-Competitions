@@ -1340,6 +1340,28 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     ).reset_index(level=0, drop=True)
     item_date_level_features["item_had_spike_before_day"] = res
 
+    # column with days elapsed since day with maximum quantity sold (before current day), by item
+
+    max_qty_by_item_date = item_date_level_features.groupby("item_id").apply(
+        lambda x: x.set_index("date")["item_qty_sold_day"].expanding().max()
+    )
+    item_date_level_features["date_of_max_qty"] = (
+        max_qty_by_item_date.groupby(max_qty_by_item_date)
+        .transform("idxmax")
+        .apply(lambda x: pd.to_datetime(x[1]))
+        .values
+    )
+    item_date_level_features["date_of_max_qty"] = item_date_level_features.groupby(
+        "item_id"
+    ).date_of_max_qty.shift()
+    item_date_level_features.loc[
+        item_date_level_features.date_of_max_qty.isnull(), "date_of_max_qty"
+    ] = item_date_level_features.date
+    item_date_level_features["days_since_max_qty_sold"] = (
+        item_date_level_features.date - item_date_level_features.date_of_max_qty
+    ).dt.days
+    item_date_level_features.drop("date_of_max_qty", axis=1, inplace=True)
+
     item_date_level_features = _downcast(item_date_level_features)
     item_date_level_features = _add_col_prefix(item_date_level_features, "id_")
 
@@ -2161,6 +2183,31 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     ].apply(
         lambda x: x.rolling(7, min_periods=1).mean().shift().bfill()
     )
+
+    # column with days elapsed since day with maximum quantity sold (before current day), by shop-item
+
+    max_qty_by_shop_item_date = item_date_level_features.groupby(
+        ["shop_id", "item_id"]
+    ).apply(lambda x: x.set_index("date")["shop_item_qty_sold_day"].expanding().max())
+    shop_item_date_level_features["date_of_max_qty"] = (
+        max_qty_by_shop_item_date.groupby(max_qty_by_shop_item_date)
+        .transform("idxmax")
+        .apply(lambda x: pd.to_datetime(x[2]))
+        .values
+    )
+    shop_item_date_level_features[
+        "date_of_max_qty"
+    ] = shop_item_date_level_features.groupby(
+        ["shop_id", "item_id"]
+    ).date_of_max_qty.shift()
+    shop_item_date_level_features.loc[
+        shop_item_date_level_features.date_of_max_qty.isnull(), "date_of_max_qty"
+    ] = shop_item_date_level_features.date
+    shop_item_date_level_features["days_since_max_qty_sold"] = (
+        shop_item_date_level_features.date
+        - shop_item_date_level_features.date_of_max_qty
+    ).dt.days
+    shop_item_date_level_features.drop("date_of_max_qty", axis=1, inplace=True)
 
     shop_item_date_level_features = _downcast(shop_item_date_level_features)
     shop_item_date_level_features = _add_col_prefix(
