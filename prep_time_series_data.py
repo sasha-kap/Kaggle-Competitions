@@ -2,7 +2,7 @@
 Sales Time Series Dataset Processing and Database Load
 Create features at different levels of analysis and upload to PostgreSQL on AWS RDS.
 
-Copyright (c) 2020 Sasha Kapralov
+Copyright (c) 2021 Sasha Kapralov
 Licensed under the MIT License (see LICENSE for details)
 
 ------------------------------------------------------------
@@ -24,7 +24,7 @@ import warnings
 # Third-party library imports
 import numpy as np
 import pandas as pd
-from scipy.stats import variation, mode
+from scipy.stats import median_absolute_deviation, variation
 from tqdm import tqdm
 
 # Local imports
@@ -74,19 +74,19 @@ def _all_float_to_int(df):
     return _multi_assign(df_to_use, transform_fn, condition)
 
 
-def _downcast_all(df, target_type, inital_type=None):
+def _downcast_all(df, target_type, initial_type=None):
     # Gotta specify floats, unsigned, or integer
     # If integer, gotta be 'integer', not 'int'
     # Unsigned should look for Ints
-    if inital_type is None:
-        inital_type = target_type
+    if initial_type is None:
+        initial_type = target_type
 
     df_to_use = df.copy()
 
     transform_fn = lambda x: pd.to_numeric(x, downcast=target_type)
 
     condition = lambda x: list(
-        x.select_dtypes(include=[inital_type], exclude=["uint32"]).columns
+        x.select_dtypes(include=[initial_type], exclude=["uint32"]).columns
     )
 
     return _multi_assign(df_to_use, transform_fn, condition)
@@ -97,7 +97,7 @@ def _downcast(df_in):
         df_in.pipe(_all_float_to_int)
         .pipe(_downcast_all, "float")
         .pipe(_downcast_all, "integer")
-        .pipe(_downcast_all, target_type="unsigned", inital_type="integer")
+        .pipe(_downcast_all, target_type="unsigned", initial_type="integer")
     )
 
 
@@ -306,42 +306,6 @@ def build_shop_lvl_features(return_df=False, to_sql=False):
     shops_df.loc[
         shops_df[shops_df.city == "Интернет-магазин"].index, ["n_other_stores_in_city"]
     ] = np.nan
-
-    # Total Transaction Counts (at Item-Date Level) by Shop
-
-    # Add column for total transaction counts (at item-date level) by shop
-    shop_total_tx_cts = (
-        sales.groupby("shop_id")
-        .size()
-        .reset_index()
-        .rename(columns={0: "shop_total_tx_cnt"})
-    )
-    shops_df = shops_df.merge(shop_total_tx_cts, on="shop_id", how="left")
-
-    # Number of Unique Items Sold at Shop
-
-    # Add column for number of unique items sold by shop
-    unique_items_by_shop = sales.groupby("shop_id")["item_id"].unique()
-    unique_item_cts_by_shop = (
-        unique_items_by_shop.map(len)
-        .reset_index()
-        .rename(columns={"item_id": "shop_unique_item_cts"})
-    )
-    shops_df = shops_df.merge(unique_item_cts_by_shop, on="shop_id", how="left")
-
-    # Number of Unique Categories of Items Sold at Shop
-
-    # Add column for number of unique categories of items sold by shop
-    sales_w_item_cat_id = sales[["item_id", "shop_id",]].merge(
-        items_df, on="item_id", how="left"
-    )
-    unique_cat_cts_by_shop = (
-        sales_w_item_cat_id.groupby("shop_id")["item_category_id"]
-        .nunique()
-        .reset_index()
-        .rename(columns={"item_category_id": "shop_unique_cat_cts"})
-    )
-    shops_df = shops_df.merge(unique_cat_cts_by_shop, on="shop_id", how="left")
 
     shops_df = _downcast(shops_df)
     shops_df = _add_col_prefix(shops_df, "s_")
@@ -774,7 +738,7 @@ def build_date_lvl_features(return_df=False, to_sql=False):
             f"day_total_qty_sold_{shift_val}day_lag"
         ] = date_level_features.day_total_qty_sold.shift(shift_val)
 
-    # create column for 1-day lagged brent price (based on the results of cross-correlation analysis above)
+    # create column for 1-day lagged brent price (based on the results of cross-correlation analysis)
     date_level_features["brent_1day_lag"] = date_level_features.brent.shift(1)
 
     date_level_features = _downcast(date_level_features)
@@ -1002,7 +966,7 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
 
     item_date_level_features.drop("day_w_sale", axis=1, inplace=True)
 
-    # Rolling 7-day min, max and mean quantity values, excluding current day except for first item-date
+    # Rolling 7-day min, max, mean, mode and median quantity values, excluding current day except for first item-date
 
     item_date_level_features[
         "item_rolling_7d_max_qty"
@@ -1020,7 +984,45 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         lambda x: x.rolling(7, 1).mean().shift().bfill()
     )
 
-    # Expanding Max, Min, Mean Quantity Values
+    item_date_level_features[
+        "item_rolling_7d_mode_qty"
+    ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].apply(
+        lambda x: x.rolling(7, 1)
+        .agg(lambda x: x.value_counts().index[0])
+        .shift()
+        .bfill()
+    )
+
+    item_date_level_features[
+        "item_rolling_7d_median_qty"
+    ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].apply(
+        lambda x: x.rolling(7, 1).median().shift().bfill()
+    )
+
+    # Expanding CV2 (Coef of Variation Squared) of Quantity Bought Before Current Day
+    # with only non-zero quantity values considered
+
+    item_date_level_features["expand_cv2_of_qty"] = (
+        item_date_level_features.groupby("item_id")["item_qty_sold_day"]
+        .expanding()
+        .apply(
+            lambda x: np.square(
+                np.nanstd(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
+                / np.nanmean(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
+            ),
+            raw=True,
+        )
+    )
+
+    # Expanding Average Demand Interval Before Current Day
+
+    item_date_level_features["item_expanding_adi"] = (
+        item_date_level_features["item_days_since_first_sale"]
+        .div(item_date_level_features["item_cnt_sale_dts_before_day"])
+        .replace(np.inf, 0)
+    )
+
+    # Expanding Max, Min, Mean, Mode and Median Quantity Values
 
     item_date_level_features["item_expand_qty_max"] = item_date_level_features.groupby(
         "item_id"
@@ -1033,6 +1035,18 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features["item_expand_qty_mean"] = item_date_level_features.groupby(
         "item_id"
     )["item_qty_sold_day"].apply(lambda x: x.expanding().mean().shift().bfill())
+
+    item_date_level_features["item_expand_qty_mode"] = item_date_level_features.groupby(
+        "item_id"
+    )["item_qty_sold_day"].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
+    )
+
+    item_date_level_features[
+        "item_expand_qty_median"
+    ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].apply(
+        lambda x: x.expanding().median().shift().bfill()
+    )
 
     # Quantity Sold 1, 2, 3 Days Ago
 
@@ -1068,7 +1082,7 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
     item_date_level_features.item_qty_sold_last_dow.fillna(0, inplace=True)
 
     # Longest Time Interval Between Sales of Items Up to (and Not Including) Current Date
-    # Also, shortest, mean, median, and standard deviation
+    # Also, shortest, mean, median, mode and standard deviation
 
     item_date_level_features["item_days_since_prev_sale_lmtd"] = np.where(
         item_date_level_features.item_qty_sold_day > 0,
@@ -1102,6 +1116,13 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
         "item_days_since_prev_sale_lmtd"
     ].apply(
         lambda x: x.expanding().median().shift().bfill()
+    )
+    item_date_level_features[
+        "item_date_mode_gap_bw_sales"
+    ] = item_date_level_features.groupby("item_id")[
+        "item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
     )
     item_date_level_features[
         "item_date_std_gap_bw_sales"
@@ -1535,7 +1556,7 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
     shop_date_level_features.shop_qty_sold_last_dow.fillna(0, inplace=True)
 
     # Number of Days in Previous 7-Day and 30-Day Periods with a Sale
-    # also numbrer of days since the beginning of the train period
+    # also number of days since the beginning of the train period
 
     shop_date_level_features["day_w_sale"] = np.where(
         shop_date_level_features.shop_qty_sold_day > 0, 1, 0
@@ -1577,7 +1598,7 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
     shop_date_level_features.shop_qty_sold_3d_ago.fillna(0, inplace=True)
 
     # Longest Time Interval Between Sales at Shops Up to (and Not Including) Current Date
-    # Also, shortest, mean, median, and standard deviation
+    # Also, shortest, mean, median, mode and standard deviation
 
     shop_date_level_features["shop_days_since_prev_sale_lmtd"] = np.where(
         shop_date_level_features.shop_qty_sold_day > 0,
@@ -1611,6 +1632,13 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         "shop_days_since_prev_sale_lmtd"
     ].apply(
         lambda x: x.expanding().median().shift().bfill()
+    )
+    shop_date_level_features[
+        "shop_date_mode_gap_bw_sales"
+    ] = shop_date_level_features.groupby("shop_id")[
+        "shop_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
     )
     shop_date_level_features[
         "shop_date_std_gap_bw_sales"
@@ -1679,7 +1707,7 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
 
     # Expanding values
 
-    # Expanding Max, Min, Mean Quantity Values
+    # Expanding Max, Min, Mean, Mode and Median Quantity Values
 
     shop_date_level_features["shop_expand_qty_max"] = shop_date_level_features.groupby(
         "shop_id"
@@ -1693,7 +1721,19 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         "shop_id"
     )["shop_qty_sold_day"].apply(lambda x: x.expanding().mean().shift().bfill())
 
-    # Rolling values
+    shop_date_level_features["shop_expand_qty_mean"] = shop_date_level_features.groupby(
+        "shop_id"
+    )["shop_qty_sold_day"].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
+    )
+
+    shop_date_level_features[
+        "shop_expand_qty_median"
+    ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
+        lambda x: x.expanding().median().shift().bfill()
+    )
+
+    # 7-day Rolling values
 
     shop_date_level_features[
         "shop_rolling_7d_max_qty"
@@ -1709,6 +1749,19 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
         "shop_rolling_7d_mean_qty"
     ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
         lambda x: x.rolling(7, min_periods=1).mean().shift().bfill()
+    )
+    shop_date_level_features[
+        "shop_rolling_7d_mode_qty"
+    ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
+        lambda x: x.rolling(7, min_periods=1)
+        .agg(lambda x: x.value_counts().index[0])
+        .shift()
+        .bfill()
+    )
+    shop_date_level_features[
+        "shop_rolling_7d_median_qty"
+    ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].apply(
+        lambda x: x.rolling(7, min_periods=1).median().shift().bfill()
     )
 
     # Number of Unique Items Sold at Shops Prior to Current Day
@@ -1739,6 +1792,39 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
 
     shop_date_level_features = shop_date_level_features.merge(
         shop_dates_w_item_cts, on=["shop_id", "date"], how="left"
+    )
+
+    # Number of Unique Categories of Items Sold at Shops Prior to Current Day
+
+    # add item_category_id column
+    sales_sorted = sales_sorted.merge(
+        items_df[["item_id", "item_category_id"]], on="item_id", how="left"
+    )
+
+    shop_dates_w_item_cat_cts = sales_sorted[["item_category_id", "date"]]
+    shop_dates_w_item_cat_cts.index = [
+        sales_sorted.shop_id,
+        sales_sorted.groupby("shop_id").cumcount().rename("sidx"),
+    ]
+
+    shop_dates_w_item_cat_cts = (
+        shop_dates_w_item_cat_cts.groupby(level="shop_id")
+        .apply(_lag_merge_asof, "item_category_id", lag=1)
+        .reset_index("shop_id")
+        .reset_index(drop=True)
+        .rename(
+            columns={
+                "num_unique_values_prior_to_day": "num_unique_item_cats_prior_to_day"
+            },
+            axis=1,
+        )
+    )
+    shop_dates_w_item_cat_cts.drop_duplicates(subset=["shop_id", "date"], inplace=True)
+    shop_dates_w_item_cat_cts.num_unique_item_cats_prior_to_day.fillna(0, inplace=True)
+    shop_dates_w_item_cat_cts.drop("item_category_id", axis=1, inplace=True)
+
+    shop_date_level_features = shop_date_level_features.merge(
+        shop_dates_w_item_cat_cts, on=["shop_id", "date"], how="left"
     )
 
     shop_date_level_features = _downcast(shop_date_level_features)
@@ -1963,7 +2049,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
 
     shop_item_date_level_features.drop("day_w_sale", axis=1, inplace=True)
 
-    # Expanding Coefficient of Variation of item price (across all shop-items before current date)
+    # Expanding Coefficient of Variation of item price (across all dates for shop-item before current date)
 
     shop_item_date_level_features["coef_var_price"] = sales.groupby(
         ["shop_id", "item_id"]
@@ -1975,7 +2061,38 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         ["shop_id", "item_id"]
     )["item_cnt_day"].apply(lambda x: x.expanding().agg(_mad).shift().bfill())
 
-    # Expanding Max, Min and Mean Quantity Values
+    # Expanding Median Absolute Deviation of Quantity Sold (across all shop-items before current date)
+
+    shop_item_date_level_features["quant_median_abs_dev"] = sales.groupby(
+        ["shop_id", "item_id"]
+    )["item_cnt_day"].apply(
+        lambda x: x.expanding().agg(median_absolute_deviation).shift().bfill()
+    )
+
+    # Expanding CV2 (Coef of Variation Squared) of Quantity Bought Before Current Day
+    # with only non-zero quantity values considered
+
+    shop_item_date_level_features["expand_cv2_of_qty"] = (
+        sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
+        .expanding()
+        .apply(
+            lambda x: np.square(
+                np.nanstd(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
+                / np.nanmean(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
+            ),
+            raw=True,
+        )
+    )
+
+    # Expanding Average Demand Interval Before Current Day
+
+    shop_item_date_level_features["shop_item_expanding_adi"] = (
+        shop_item_date_level_features["shop_item_days_since_first_sale"]
+        .div(shop_item_date_level_features["shop_item_cnt_sale_dts_before_day"])
+        .replace(np.inf, 0)
+    )
+
+    # Expanding Max, Min, Mean, Mode and Median Quantity Values
 
     shop_item_date_level_features[
         "shop_item_expand_qty_max"
@@ -1999,6 +2116,22 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         "shop_item_qty_sold_day"
     ].apply(
         lambda x: x.expanding().mean().shift().bfill()
+    )
+
+    shop_item_date_level_features[
+        "shop_item_expand_qty_mode"
+    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+        "shop_item_qty_sold_day"
+    ].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
+    )
+
+    shop_item_date_level_features[
+        "shop_item_expand_qty_median"
+    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+        "shop_item_qty_sold_day"
+    ].apply(
+        lambda x: x.expanding().median().shift().bfill()
     )
 
     # Quantity Sold 1, 2, 3 Days Ago
@@ -2050,7 +2183,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     shop_item_date_level_features.shop_item_qty_sold_last_dow.fillna(0, inplace=True)
 
     # Longest Time Interval Between Sales of Items at Shops Up to (and Not Including) Current Date
-    # Also, shortest, mean, median, and standard deviation
+    # Also, shortest, mean, median, mode and standard deviation
 
     shop_item_date_level_features["shop_item_days_since_prev_sale_lmtd"] = np.where(
         shop_item_date_level_features.shop_item_qty_sold_day > 0,
@@ -2084,6 +2217,13 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         "shop_item_days_since_prev_sale_lmtd"
     ].apply(
         lambda x: x.expanding().median().shift().bfill()
+    )
+    shop_item_date_level_features[
+        "shop_item_date_mode_gap_bw_sales"
+    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+        "shop_item_days_since_prev_sale_lmtd"
+    ].apply(
+        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
     )
     shop_item_date_level_features[
         "shop_item_date_std_gap_bw_sales"
@@ -2160,7 +2300,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         shop_item_date_level_features.date != datetime.datetime(*FIRST_DAY_OF_TEST_PRD)
     ].reset_index(drop=True)
 
-    # Rolling values
+    # 7-Day Rolling values
 
     shop_item_date_level_features[
         "shop_item_rolling_7d_max_qty"
@@ -2182,6 +2322,23 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         "shop_item_qty_sold_day"
     ].apply(
         lambda x: x.rolling(7, min_periods=1).mean().shift().bfill()
+    )
+    shop_item_date_level_features[
+        "shop_item_rolling_7d_mode_qty"
+    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+        "shop_item_qty_sold_day"
+    ].apply(
+        lambda x: x.rolling(7, min_periods=1)
+        .agg(lambda x: x.value_counts().index[0])
+        .shift()
+        .bfill()
+    )
+    shop_item_date_level_features[
+        "shop_item_rolling_7d_median_qty"
+    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+        "shop_item_qty_sold_day"
+    ].apply(
+        lambda x: x.rolling(7, min_periods=1).median().shift().bfill()
     )
 
     # column with days elapsed since day with maximum quantity sold (before current day), by shop-item
