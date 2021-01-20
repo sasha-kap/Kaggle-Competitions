@@ -24,7 +24,8 @@ import warnings
 # Third-party library imports
 import numpy as np
 import pandas as pd
-from scipy.stats import median_absolute_deviation, variation
+
+# from scipy.stats import median_absolute_deviation, variation
 from tqdm import tqdm
 
 # Local imports
@@ -201,9 +202,7 @@ def _add_col_prefix(df, prefix, cols_not_to_rename=["shop_id", "item_id", "date"
 
 
 # SHOP-LEVEL FEATURES
-def _lat_lon_to_float(
-    in_coord, degree_sign="\N{DEGREE SIGN}", remove=degree_sign + "′" + "″"
-):
+def _lat_lon_to_float(in_coord, degree_sign="\N{DEGREE SIGN}"):
     """Convert latitude-longitude text string into latitude and longitude floats.
 
     Parameters:
@@ -212,14 +211,13 @@ def _lat_lon_to_float(
         latitude-longitude string (example format: '55°53′21″ с. ш. 37°26′42″ в. д.')
     degree_sign : str
         Unicode representation of degree sign
-    remove : str
-        Concatenation of characters to remove from latitude-longitude string
 
     Returns:
     --------
     geo_lat, geo_lon: float values of latitude and longitude (i.e., with minutes
         and seconds converted to decimals)
     """
+    remove = degree_sign + "′" + "″"
     geo_list = (
         in_coord.translate({ord(char): " " for char in remove})
         .replace("с. ш.", ",")
@@ -1947,7 +1945,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
     shop_item_date_level_features.sort_values(
         by=["shop_id", "item_id", "date"], inplace=True, ignore_index=True
     )
-    shop_date_level_features.shop_item_qty_sold_day.fillna(0, inplace=True)
+    shop_item_date_level_features.shop_item_qty_sold_day.fillna(0, inplace=True)
 
     # Previous Non-Zero Quantity Sold by Shop-Item-Date
 
@@ -2343,7 +2341,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
 
     # column with days elapsed since day with maximum quantity sold (before current day), by shop-item
 
-    max_qty_by_shop_item_date = item_date_level_features.groupby(
+    max_qty_by_shop_item_date = shop_date_level_features.groupby(
         ["shop_id", "item_id"]
     ).apply(lambda x: x.set_index("date")["shop_item_qty_sold_day"].expanding().max())
     shop_item_date_level_features["date_of_max_qty"] = (
