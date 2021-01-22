@@ -1048,20 +1048,15 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
 
     # Quantity Sold 1, 2, 3 Days Ago
 
-    item_date_level_features["item_qty_sold_1d_ago"] = item_date_level_features.groupby(
-        "item_id"
-    )["item_qty_sold_day"].shift()
-    item_date_level_features.item_qty_sold_1d_ago.fillna(0, inplace=True)
-
-    item_date_level_features["item_qty_sold_2d_ago"] = item_date_level_features.groupby(
-        "item_id"
-    )["item_qty_sold_day"].shift(2)
-    item_date_level_features.item_qty_sold_2d_ago.fillna(0, inplace=True)
-
-    item_date_level_features["item_qty_sold_3d_ago"] = item_date_level_features.groupby(
-        "item_id"
-    )["item_qty_sold_day"].shift(3)
-    item_date_level_features.item_qty_sold_3d_ago.fillna(0, inplace=True)
+    for shift_val in [1, 2, 3]:
+        item_date_level_features[
+            f"item_qty_sold_{shift_val}d_ago"
+        ] = item_date_level_features.groupby("item_id")["item_qty_sold_day"].shift(
+            shift_val
+        )
+        item_date_level_features[f"item_qty_sold_{shift_val}d_ago"].fillna(
+            0, inplace=True
+        )
 
     # Quantity Sold Same Day Previous Week
 
@@ -1196,16 +1191,19 @@ def build_item_date_lvl_features(return_df=False, to_sql=False):
 
     # create dataframe with daily totals of quantity sold for each category
     cat_date_total_qty = (
-        item_date_level_features[["date", "item_category_id", "item_qty_sold_day"]]
-        .groupby("item_category_id")
-        .apply(lambda x: x.set_index("date").item_qty_sold_day.sum())
-        .reset_index()
+        (
+            item_date_level_features[["date", "item_category_id", "item_qty_sold_day"]]
+            .groupby("item_category_id")
+            .apply(lambda x: x.resample("D", on="date").item_qty_sold_day.sum())
+        )
+        .stack()
+        .reset_index(name="cat_qty_sold_day")
     )
 
     # calculate rolling weekly sum of quantity sold for each category, excluding current date
     cat_date_total_qty["cat_qty_sold_last_7d"] = cat_date_total_qty.groupby(
         "item_category_id"
-    )["item_qty_sold_day"].apply(lambda x: x.rolling(7, 1).sum().shift().fillna(0))
+    )["cat_qty_sold_day"].apply(lambda x: x.rolling(7, 1).sum().shift().fillna(0))
 
     # merge rolling weeekly category quantity totals onto item-date dataset
     item_date_level_features = item_date_level_features.merge(
@@ -1580,20 +1578,15 @@ def build_shop_date_lvl_features(return_df=False, to_sql=False):
 
     # Quantity Sold 1, 2, 3 Days Ago
 
-    shop_date_level_features["shop_qty_sold_1d_ago"] = shop_date_level_features.groupby(
-        "shop_id"
-    )["shop_qty_sold_day"].shift()
-    shop_date_level_features.shop_qty_sold_1d_ago.fillna(0, inplace=True)
-
-    shop_date_level_features["shop_qty_sold_2d_ago"] = shop_date_level_features.groupby(
-        "shop_id"
-    )["shop_qty_sold_day"].shift(2)
-    shop_date_level_features.shop_qty_sold_2d_ago.fillna(0, inplace=True)
-
-    shop_date_level_features["shop_qty_sold_3d_ago"] = shop_date_level_features.groupby(
-        "shop_id"
-    )["shop_qty_sold_day"].shift(3)
-    shop_date_level_features.shop_qty_sold_3d_ago.fillna(0, inplace=True)
+    for shift_val in [1, 2, 3]:
+        shop_date_level_features[
+            f"shop_qty_sold_{shift_val}d_ago"
+        ] = shop_date_level_features.groupby("shop_id")["shop_qty_sold_day"].shift(
+            shift_val
+        )
+        shop_date_level_features[f"shop_qty_sold_{shift_val}d_ago"].fillna(
+            0, inplace=True
+        )
 
     # Longest Time Interval Between Sales at Shops Up to (and Not Including) Current Date
     # Also, shortest, mean, median, mode and standard deviation
@@ -2134,30 +2127,17 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
 
     # Quantity Sold 1, 2, 3 Days Ago
 
-    shop_item_date_level_features[
-        "shop_item_qty_sold_1d_ago"
-    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
-        "shop_item_qty_sold_day"
-    ].shift()
-    shop_item_date_level_features.shop_item_qty_sold_1d_ago.fillna(0, inplace=True)
-
-    shop_item_date_level_features[
-        "shop_item_qty_sold_2d_ago"
-    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
-        "shop_item_qty_sold_day"
-    ].shift(
-        2
-    )
-    shop_item_date_level_features.shop_item_qty_sold_2d_ago.fillna(0, inplace=True)
-
-    shop_item_date_level_features[
-        "shop_item_qty_sold_3d_ago"
-    ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
-        "shop_item_qty_sold_day"
-    ].shift(
-        3
-    )
-    shop_item_date_level_features.shop_item_qty_sold_3d_ago.fillna(0, inplace=True)
+    for shift_val in [1, 2, 3]:
+        shop_item_date_level_features[
+            f"shop_item_qty_sold_{shift_val}d_ago"
+        ] = shop_item_date_level_features.groupby(["shop_id", "item_id"])[
+            "shop_item_qty_sold_day"
+        ].shift(
+            shift_val
+        )
+        shop_item_date_level_features[f"shop_item_qty_sold_{shift_val}d_ago"].fillna(
+            0, inplace=True
+        )
 
     # Quantity Sold Same Day Previous Week
 
@@ -2363,6 +2343,56 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False):
         - shop_item_date_level_features.date_of_max_qty
     ).dt.days
     shop_item_date_level_features.drop("date_of_max_qty", axis=1, inplace=True)
+
+    # Demand for Category in Last Week (Quantity Sold)
+    # also, flag for whether any items in same category were sold at the shop before current day
+
+    # Add item_category_id column
+    shop_item_date_level_features = shop_item_date_level_features.merge(
+        items_df[["item_id", "item_category_id"]], on="item_id", how="left"
+    )
+
+    # create dataframe with daily totals of quantity sold for each category at each shop
+    shop_cat_date_total_qty = (
+        shop_item_date_level_features[
+            ["shop_id", "date", "item_category_id", "item_qty_sold_day"]
+        ]
+        .groupby(["shop_id", "item_category_id"])
+        .apply(lambda x: x.resample("D", on="date").shop_item_qty_sold_day.sum())
+    ).reset_index(name="shop_cat_qty_sold_day")
+
+    # calculate rolling weekly sum of quantity sold for each category at each shop, excluding current date
+    shop_cat_date_total_qty[
+        "shop_cat_qty_sold_last_7d"
+    ] = shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
+        "shop_cat_qty_sold_day"
+    ].apply(
+        lambda x: x.rolling(7, 1).sum().shift().fillna(0)
+    )
+
+    shop_cat_date_total_qty["cat_sold_at_shop_before_day_flag"] = (
+        shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
+            "shop_cat_qty_sold_day"
+        ]
+        .apply(lambda x: x.expanding().sum().shift().fillna(0))
+        .astype(bool)
+        .astype(np.int8)
+    )
+
+    # merge rolling weeekly category quantity totals and flag column onto shop-item-date dataset
+    shop_item_date_level_features = shop_item_date_level_features.merge(
+        shop_cat_date_total_qty[
+            [
+                "shop_id",
+                "item_category_id",
+                "date",
+                "shop_cat_qty_sold_last_7d",
+                "cat_sold_at_shop_before_day_flag",
+            ]
+        ],
+        on=["shop_id", "item_category_id", "date"],
+        how="left",
+    )
 
     shop_item_date_level_features = _downcast(shop_item_date_level_features)
     shop_item_date_level_features = _add_col_prefix(
