@@ -24,11 +24,13 @@ from functools import wraps
 import time
 from typing import Any, Callable, ClassVar, Dict, Optional
 
+
 class TimerError(Exception):
     """A custom exception used to report errors in use of Timer class"""
 
+
 @dataclass
-class Timer():
+class Timer:
     """Time your code using a class, context manager, or decorator"""
 
     timers: ClassVar[Dict[str, float]] = dict()
@@ -45,9 +47,12 @@ class Timer():
 
     def __call__(self, func):
         """Support using Timer as a decorator"""
+
         @wraps(func)
         def wrapper_timer(*args, **kwargs):
-            self.logger(f"Running {func.__name__} function with {args} args and {kwargs} kwargs:")
+            self.logger(
+                f"Running {func.__name__} function with {args} args and {kwargs} kwargs:"
+            )
             with self:
                 self.func_name = func.__name__
                 return func(*args, **kwargs)
