@@ -52,7 +52,6 @@ class Timer:
         @wraps(func)
         def wrapper_timer(*args, **kwargs):
             self.logger(
-                # f"Running {func.__name__} function with {str(args)} args and {str(kwargs)} kwargs:"
                 f"Running {func.__name__} function with {inspect.signature(func)} args/kwargs."
             )
             with self:
