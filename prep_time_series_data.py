@@ -97,7 +97,8 @@ def _downcast_all(df, target_type, initial_type=None):
 
     return _multi_assign(df_to_use, transform_fn, condition)
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def _downcast(df_in):
     return (
         df_in.pipe(_all_float_to_int)
@@ -108,7 +109,7 @@ def _downcast(df_in):
 
 
 # PERFORM INITIAL DATA CLEANING
-@Timer(logger = logging.info)
+@Timer(logger=logging.info)
 def clean_sales_data(sales, return_df=False, to_sql=False):
     """Perform initial data cleaning of the train shop-item-date data.
 
@@ -138,11 +139,22 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
         sales.duplicated(subset=["shop_id", "item_id", "date"], keep=False), :
     ]
 
-    # Remove two pairs of shop-item-dates with multiple quantities when one quantity was negative
-    dupes = dupes[
-        ~((dupes.shop_id == 38) & (dupes.item_id == 15702))
-        & ~((dupes.shop_id == 5) & (dupes.item_id == 21619))
-    ]
+    # Identify shop-item-date combinations to remove because of multiple quantities
+    # where one quantity is negative
+    to_remove = (
+        dupes.groupby(["shop_id", "item_id", "date"])
+        .item_cnt_day.apply(lambda x: ((x > 0).any()) & ((x < 0).any()))
+        .reset_index(name="to_remove")
+        .query("to_remove == True")
+        .drop("to_remove", axis=1)
+    )
+
+    # Remove those combinations from the dupes dataframe
+    dupes = (
+        pd.merge(dupes, to_remove, indicator=True, how="outer")
+        .query('_merge=="left_only"')
+        .drop("_merge", axis=1)
+    )
 
     # combine remaining shop-item-date-price level values into shop-item-date level values
     # by summing the quantity sold and taking the weighted average of price (weighted by quantity)
@@ -175,7 +187,23 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
     # save DF to file
     sales.to_csv("sales_cleaned.csv", index=False)
 
-    sales.rename(columns={'date':'sale_date'}, inplace=True)
+    sales.rename(columns={"date": "sale_date"}, inplace=True)
+
+    logging.info(
+        f"Sales dataframe has {sales.shape[0]} rows and " f"{sales.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Sales dataframe has the following columns: "
+        f"{nl}{nl.join(sales.columns.to_list())}"
+    )
+    miss_vls = sales.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Sales dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
 
     if to_sql:
         write_df_to_sql(sales, "sales_cleaned")
@@ -183,7 +211,8 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
     if return_df:
         return sales
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def _add_col_prefix(df, prefix, cols_not_to_rename=["shop_id", "item_id", "date"]):
     """Rename columns in DF for easy identification by adding a prefix to column names.
 
@@ -253,7 +282,7 @@ def _lat_lon_to_float(in_coord, degree_sign="\N{DEGREE SIGN}"):
     return geo_lat, geo_lon
 
 
-@Timer(logger = logging.info)
+@Timer(logger=logging.info)
 def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
     """Build dataframe of shop-level features.
 
@@ -321,6 +350,23 @@ def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
     shops_df = _downcast(shops_df)
     shops_df = _add_col_prefix(shops_df, "s_")
 
+    logging.info(
+        f"Shops dataframe has {shops_df.shape[0]} rows and "
+        f"{shops_df.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Shops dataframe has the following columns: "
+        f"{nl}{nl.join(shops_df.columns.to_list())}"
+    )
+    miss_vls = shops_df.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Shops dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
+
     if to_sql:
         write_df_to_sql(shops_df, "shops")
 
@@ -361,7 +407,7 @@ def _group_game_consoles(cat_name):
     return cat_name
 
 
-@Timer(logger = logging.info)
+@Timer(logger=logging.info)
 def build_item_lvl_features(items_df, categories_df, return_df=False, to_sql=False):
     """Build dataframe of item-level features.
 
@@ -447,6 +493,23 @@ def build_item_lvl_features(items_df, categories_df, return_df=False, to_sql=Fal
     item_level_features = _downcast(item_level_features)
     item_level_features = _add_col_prefix(item_level_features, "i_")
 
+    logging.info(
+        f"Item-level dataframe has {item_level_features.shape[0]} rows and "
+        f"{item_level_features.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Item-level dataframe has the following columns: "
+        f"{nl}{nl.join(item_level_features.columns.to_list())}"
+    )
+    miss_vls = item_level_features.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Item-level dataframe dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
+
     if to_sql:
         write_df_to_sql(item_level_features, "items")
 
@@ -517,7 +580,8 @@ def _month_counter(d1):
         - datetime.datetime(*FIRST_DAY_OF_TRAIN_PRD).month
     )
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=False):
     """Build dataframe of date-level features.
 
@@ -764,7 +828,24 @@ def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=F
     date_level_features = _downcast(date_level_features)
     date_level_features = _add_col_prefix(date_level_features, "d_")
 
-    date_level_features.rename(columns={'date':'sale_date'}, inplace=True)
+    date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
+
+    logging.info(
+        f"Date-level dataframe has {date_level_features.shape[0]} rows and "
+        f"{date_level_features.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Date-level dataframe has the following columns: "
+        f"{nl}{nl.join(date_level_features.columns.to_list())}"
+    )
+    miss_vls = date_level_features.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Date-level dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
 
     if to_sql:
         write_df_to_sql(date_level_features, "dates")
@@ -817,7 +898,8 @@ def _lag_merge_asof(df, col_to_count, lag):
     d = d.reset_index(name="num_unique_values_prior_to_day")
     return pd.merge_asof(df, d)
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def add_zero_qty_rows(df, levels):
     """Add new (missing) rows between first and last dates of observed sales for
     each value of levels, with 0 values for quantity sold.
@@ -846,7 +928,8 @@ def add_zero_qty_rows(df, levels):
     df[f"{'_'.join(levels)}_qty_sold_day"].fillna(0, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def add_zero_qty_after_last_date_rows(df, test_df, levels):
     """Add new (missing) rows between last observed sale date and last day of
     the training period for each value of levels and only for levels that exist
@@ -916,7 +999,8 @@ def add_zero_qty_after_last_date_rows(df, test_df, levels):
     df[f"{'_'.join(levels)}_qty_sold_day"].fillna(0, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def prev_nonzero_qty_sold(df, levels):
     """Create previous non-zero quantity sold column in dataframe, grouped by values in
     specified column(s).
@@ -933,28 +1017,25 @@ def prev_nonzero_qty_sold(df, levels):
     df : pandas DataFrame
         Updated dataframe
     """
-    try:
-        df[f"{'_'.join(levels)}_last_qty_sold"] = (
-            df[f"{'_'.join(levels)}_qty_sold_day"]
-            .replace(to_replace=0, method="ffill")
-            .shift()
-        )
-        df.loc[
-            df.groupby([level + "_id" for level in levels])[
-                f"{'_'.join(levels)}_last_qty_sold"
-            ]
-            .head(1)
-            .index,
-            f"{'_'.join(levels)}_last_qty_sold",
-        ] = np.NaN
-        # fill null values (first item-date) with 0's
-        df[f"{'_'.join(levels)}_last_qty_sold"].fillna(0, inplace=True)
-        return df
-    except KeyError as e:
-        print("prev_nonzero_qty_sold function was not executed due to:")
-        print(e)
+    df[f"{'_'.join(levels)}_last_qty_sold"] = (
+        df[f"{'_'.join(levels)}_qty_sold_day"]
+        .replace(to_replace=0, method="ffill")
+        .shift()
+    )
+    df.loc[
+        df.groupby([level + "_id" for level in levels])[
+            f"{'_'.join(levels)}_last_qty_sold"
+        ]
+        .head(1)
+        .index,
+        f"{'_'.join(levels)}_last_qty_sold",
+    ] = np.NaN
+    # fill null values (first item-date) with 0's
+    df[f"{'_'.join(levels)}_last_qty_sold"].fillna(0, inplace=True)
+    return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def days_elapsed_since_prev_sale(df, levels):
     """Create days elapsed since previous sale column in dataframe, grouped by values in
     specified column(s).
@@ -985,7 +1066,8 @@ def days_elapsed_since_prev_sale(df, levels):
     df.drop(last_date, axis=1, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def days_elapsed_since_first_sale(df, levels):
     """Create days elapsed since first sale column in dataframe, grouped by values in
     specified column(s).
@@ -1008,7 +1090,8 @@ def days_elapsed_since_first_sale(df, levels):
     ).dt.days
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def first_week_month_of_sale(df, levels):
     """Create indicator columns for first week and first month of sale.
 
@@ -1034,7 +1117,8 @@ def first_week_month_of_sale(df, levels):
     ).astype(np.int8)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def num_of_sale_dts_in_prev_x_days(df, levels):
     """Create columns for number of days in previous 7-day and 30-day periods
     with a sale, as well as number of days with a sale since start of train period.
@@ -1068,7 +1152,8 @@ def num_of_sale_dts_in_prev_x_days(df, levels):
     df.drop("day_w_sale", axis=1, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def rolling_7d_qty_stats(df, levels):
     """Create rolling max, min, mean, mode and median quantity sold values,
     grouped by values of specified column(s).
@@ -1117,7 +1202,8 @@ def rolling_7d_qty_stats(df, levels):
     )
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def expanding_cv2_of_qty(df, levels):
     """Create column for expanding coefficient of variation squared of quantity
     bought before current day, with only non-zero quantity values considered.
@@ -1149,7 +1235,8 @@ def expanding_cv2_of_qty(df, levels):
     )
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def expanding_avg_demand_int(df, levels):
     """Create expanding average demand interval before current day column.
 
@@ -1172,7 +1259,8 @@ def expanding_avg_demand_int(df, levels):
     )
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def expanding_qty_sold_stats(df, levels):
     """Create expanding max, min, mean, mode and median quantity sold values,
     grouped by values of specified column(s).
@@ -1220,7 +1308,8 @@ def expanding_qty_sold_stats(df, levels):
     )
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def qty_sold_x_days_before(df, levels):
     """Create columns for quantity 1, 2, 3 days ago.
 
@@ -1243,7 +1332,8 @@ def qty_sold_x_days_before(df, levels):
         df[f"{'_'.join(levels)}_qty_sold_{shift_val}d_ago"].fillna(0, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def qty_sold_same_day_prev_week(df, levels):
     """Create column for quantity sold same day previous week.
 
@@ -1280,7 +1370,8 @@ def qty_sold_same_day_prev_week(df, levels):
     df[f"{'_'.join(levels)}_qty_sold_last_dow"].fillna(0, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def expanding_time_bw_sales_stats(df, levels):
     """Create expanding max, min, mean, mode, median and standard deviation of
     quantity sold values columns, grouped by values of specified column(s).
@@ -1335,7 +1426,8 @@ def expanding_time_bw_sales_stats(df, levels):
     df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def diff_bw_last_and_sec_to_last_qty(df, levels):
     """Create column containing difference between last quantity sold and
     second-to-last quantity sold, grouped by values of specified column(s).
@@ -1420,7 +1512,8 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
     ).reset_index(drop=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def num_of_unique_opp_values(df, sales, level):
     """Create column for number of unique values in column opposite to the
     specified column (i.e., for level='item_id', calculate number of unique shops
@@ -1477,7 +1570,8 @@ def num_of_unique_opp_values(df, sales, level):
     df = df.merge(group_dates_w_val_cts, on=[level, "date"], how="left")
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def days_since_max_qty_sold(df, levels):
     """Create column with days elapsed since day with maximum quantity sold
     (before current day).
@@ -1513,7 +1607,8 @@ def days_since_max_qty_sold(df, levels):
     df.drop("date_of_max_qty", axis=1, inplace=True)
     return df
 
-@Timer(logger = logging.info)
+
+@Timer(logger=logging.info)
 def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=False):
     """Build dataframe of item-date-level features.
 
@@ -1720,7 +1815,24 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     item_date_level_features = _downcast(item_date_level_features)
     item_date_level_features = _add_col_prefix(item_date_level_features, "id_")
 
-    item_date_level_features.rename(columns={'date':'sale_date'}, inplace=True)
+    item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
+
+    logging.info(
+        f"Item-date-level dataframe has {item_date_level_features.shape[0]} rows and "
+        f"{item_date_level_features.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Item-date-level dataframe has the following columns: "
+        f"{nl}{nl.join(item_date_level_features.columns.to_list())}"
+    )
+    miss_vls = item_date_level_features.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Item-date-level dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
 
     if to_sql:
         write_df_to_sql(item_date_level_features, "item_dates")
@@ -1730,7 +1842,7 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
 
 
 # SHOP-DATE-LEVEL FEATURES
-@Timer(logger = logging.info)
+@Timer(logger=logging.info)
 def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=False):
     """Build dataframe of shop-date-level features.
 
@@ -1826,7 +1938,24 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     shop_date_level_features = _downcast(shop_date_level_features)
     shop_date_level_features = _add_col_prefix(shop_date_level_features, "sd_")
 
-    shop_date_level_features.rename(columns={'date':'sale_date'}, inplace=True)
+    shop_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
+
+    logging.info(
+        f"Shop-date-level dataframe has {shop_date_level_features.shape[0]} rows and "
+        f"{shop_date_level_features.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Shop-date-level dataframe has the following columns: "
+        f"{nl}{nl.join(shop_date_level_features.columns.to_list())}"
+    )
+    miss_vls = shop_date_level_features.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Shop-date-level dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
 
     if to_sql:
         write_df_to_sql(shop_date_level_features, "shop_dates")
@@ -1853,7 +1982,7 @@ def _mad(data, axis=None):
 
 
 # SHOP-ITEM-DATE-LEVEL FEATURES
-@Timer(logger = logging.info)
+@Timer(logger=logging.info)
 def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=False):
     """Build dataframe of shop-item-date-level features.
 
@@ -1986,7 +2115,24 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         shop_item_date_level_features, "sid_"
     )
 
-    shop_item_date_level_features.rename(columns={'date':'sale_date'}, inplace=True)
+    shop_item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
+
+    logging.info(
+        f"Shop-item-date dataframe has {shop_item_date_level_features.shape[0]} "
+        f"rows and {shop_item_date_level_features.shape[1]} columns."
+    )
+    nl = "\n" + " " * 50
+    logging.info(
+        f"Shop-item-date dataframe has the following columns: "
+        f"{nl}{nl.join(shop_item_date_level_features.columns.to_list())}"
+    )
+    miss_vls = shop_item_date_level_features.isnull().sum()
+    miss_vls = miss_vls[miss_vls > 0].index.to_list()
+    if miss_vls:
+        logging.warning(
+            f"Shop-item-date dataframe has the following columns with "
+            f"null values: {nl}{nl.join(miss_vls)}"
+        )
 
     if to_sql:
         write_df_to_sql(shop_item_date_level_features, "shop_item_dates")
@@ -1998,24 +2144,26 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
 def main():
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-    log_dir_file = "./logging.log"
+    log_dir_file = f"./logging_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.log"
 
-    logging.basicConfig(level=logging.DEBUG,
-        filemode='w',
+    logging.basicConfig(
+        level=logging.DEBUG,
+        filemode="w",
         format=fmt,
         datefmt=datefmt,
-        filename=log_dir_file)
+        filename=log_dir_file,
+    )
 
     logger = logging.getLogger()
 
     logger.info(f"The Python version is {platform.python_version()}.")
     logger.info(f"The pandas version is {pd.__version__}.")
     logger.info(f"The numpy version is {np.__version__}.")
-    logger.info(f"The scipy version is {scipy.__version__}")
+    logger.info(f"The scipy version is {scipy.__version__}.")
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "command", metavar="<command>", help="'create', 'start' or 'stop'",
+        "command", metavar="<command>", help="'clean', 'shops', 'items', 'dates', 'item-dates', 'shop-dates' or 'shop-item-dates'",
     )
     parser.add_argument(
         "--send_to_sql",

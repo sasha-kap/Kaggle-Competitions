@@ -21,6 +21,7 @@ Usage:
 
 from dataclasses import dataclass, field
 from functools import wraps
+import inspect
 import time
 from typing import Any, Callable, ClassVar, Dict, Optional
 
@@ -51,7 +52,8 @@ class Timer:
         @wraps(func)
         def wrapper_timer(*args, **kwargs):
             self.logger(
-                f"Running {func.__name__} function with {args} args and {kwargs} kwargs:"
+                # f"Running {func.__name__} function with {str(args)} args and {str(kwargs)} kwargs:"
+                f"Running {func.__name__} function with {inspect.signature(func)} args/kwargs."
             )
             with self:
                 self.func_name = func.__name__
