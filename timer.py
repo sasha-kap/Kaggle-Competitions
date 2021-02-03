@@ -3,8 +3,7 @@ Slightly modified Timer class code from https://realpython.com/python-timer/
 to be used for printing elapsed execution time for functions.
 
 Modifications to original code:
-    - Printing to log includes function name and values of arguments passed
-        to function
+    - Printing to log includes function name
 
 Usage:
 
@@ -21,7 +20,6 @@ Usage:
 
 from dataclasses import dataclass, field
 from functools import wraps
-import inspect
 import time
 from typing import Any, Callable, ClassVar, Dict, Optional
 
@@ -52,7 +50,7 @@ class Timer:
         @wraps(func)
         def wrapper_timer(*args, **kwargs):
             self.logger(
-                f"Running {func.__name__} function with {inspect.signature(func)} args/kwargs."
+                f"Starting to run {func.__name__} function..."
             )
             with self:
                 self.func_name = func.__name__

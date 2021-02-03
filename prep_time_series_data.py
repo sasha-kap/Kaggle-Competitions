@@ -25,7 +25,6 @@ import platform
 import warnings
 
 # Third-party library imports
-import bottleneck as bn
 import numpy as np
 import pandas as pd
 import scipy
@@ -187,8 +186,6 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
     # save DF to file
     sales.to_csv("sales_cleaned.csv", index=False)
 
-    sales.rename(columns={"date": "sale_date"}, inplace=True)
-
     logging.info(
         f"Sales dataframe has {sales.shape[0]} rows and " f"{sales.shape[1]} columns."
     )
@@ -206,6 +203,7 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
         )
 
     if to_sql:
+        sales.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(sales, "sales_cleaned")
 
     if return_df:
@@ -582,7 +580,7 @@ def _month_counter(d1):
 
 
 @Timer(logger=logging.info)
-def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=False):
+def build_date_lvl_features(macro_df, ps4games, return_df=False, to_sql=False):
     """Build dataframe of date-level features.
 
     Parameters:
@@ -601,6 +599,14 @@ def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=F
     date_level_features : pandas dataframe
         Dataframe with each row representing a date and columns containing date-level features
     """
+
+    # check if cleaned sales file already exists
+    cleaned_sales_file = Path("sales_cleaned.csv")
+    if cleaned_sales_file.is_file():
+        sales = pd.read_csv("sales_cleaned.csv")
+        sales["date"] = pd.to_datetime(sales.date)
+    else:
+        sales = clean_sales_data(sales, return_df=True)
 
     # Dates from Start to End of Training Period
     date_level_features = pd.DataFrame(
@@ -828,8 +834,6 @@ def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=F
     date_level_features = _downcast(date_level_features)
     date_level_features = _add_col_prefix(date_level_features, "d_")
 
-    date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
-
     logging.info(
         f"Date-level dataframe has {date_level_features.shape[0]} rows and "
         f"{date_level_features.shape[1]} columns."
@@ -848,6 +852,7 @@ def build_date_lvl_features(macro_df, ps4games, sales, return_df=False, to_sql=F
         )
 
     if to_sql:
+        date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(date_level_features, "dates")
 
     if return_df:
@@ -897,6 +902,32 @@ def _lag_merge_asof(df, col_to_count, lag):
     d.index = d.index + pd.offsets.Day(lag)
     d = d.reset_index(name="num_unique_values_prior_to_day")
     return pd.merge_asof(df, d)
+
+
+def _spike_check(arr):
+    """Determine if array, with last element any non-positive elements removed,
+    has any outlier values (and how many).
+
+    Parameters:
+    -----------
+    arr : array (1d)
+        Array to check for outliers
+
+    Returns:
+    --------
+    int
+        Number of elements in array that can be classified as outliers.
+        If all data elements in array being evaluated are masked, the function
+        returns 0 (which means that none of the elements in that array are
+        outliers).
+    """
+    masked_arr = np.ma.MaskedArray(arr[:-1], mask=(np.array(arr[:-1] <= 0)))
+    if isinstance(
+        (masked_arr - np.ma.median(masked_arr) > 2 * np.ma.std(masked_arr)).sum(),
+        np.ma.core.MaskedConstant,
+    ):
+        return 0
+    return (masked_arr - np.ma.median(masked_arr) > 2 * np.ma.std(masked_arr)).sum()
 
 
 @Timer(logger=logging.info)
@@ -980,7 +1011,8 @@ def add_zero_qty_after_last_date_rows(df, test_df, levels):
             *addl_dates.level_0
         )
         addl_dates.drop("level_0", axis=1, inplace=True)
-    addl_dates.query("date != datetime.datetime(*FIRST_DAY_OF_TEST_PRD)", inplace=True)
+    first_day = datetime.datetime(*FIRST_DAY_OF_TEST_PRD)
+    addl_dates.query("date != @first_day", inplace=True)
     addl_dates = addl_dates.groupby([level + "_id" for level in levels]).apply(
         lambda group: group.iloc[1:,]
     )
@@ -1173,17 +1205,26 @@ def rolling_7d_qty_stats(df, levels):
     df[f"{'_'.join(levels)}_rolling_7d_max_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.rolling(7, 1).max().shift().bfill()
+        lambda x: x.rolling(7, 1)
+        .max()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
     df[f"{'_'.join(levels)}_rolling_7d_min_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.rolling(7, 1).min().shift().bfill()
+        lambda x: x.rolling(7, 1)
+        .min()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
     df[f"{'_'.join(levels)}_rolling_7d_avg_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.rolling(7, 1).mean().shift().bfill()
+        lambda x: x.rolling(7, 1)
+        .mean()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_rolling_7d_mode_qty"] = df.groupby(
@@ -1192,13 +1233,16 @@ def rolling_7d_qty_stats(df, levels):
         lambda x: x.rolling(7, 1)
         .agg(lambda x: x.value_counts().index[0])
         .shift()
-        .bfill()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_rolling_7d_median_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.rolling(7, 1).median().shift().bfill()
+        lambda x: x.rolling(7, 1)
+        .median()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
     return df
 
@@ -1206,7 +1250,7 @@ def rolling_7d_qty_stats(df, levels):
 @Timer(logger=logging.info)
 def expanding_cv2_of_qty(df, levels):
     """Create column for expanding coefficient of variation squared of quantity
-    bought before current day, with only non-zero quantity values considered.
+    bought before current day, with only positive quantity values considered.
 
     Parameters:
     -----------
@@ -1227,11 +1271,13 @@ def expanding_cv2_of_qty(df, levels):
         .expanding()
         .apply(
             lambda x: np.square(
-                bn.nanstd(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
-                / bn.nanmean(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0)))
+                np.ma.std(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) <= 0)))
+                / np.ma.mean(np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) <= 0)))
             ),
             raw=True,
         )
+        .fillna(0)
+        .values
     )
     return df
 
@@ -1255,7 +1301,7 @@ def expanding_avg_demand_int(df, levels):
     df[f"{'_'.join(levels)}_expanding_adi"] = (
         df[f"{'_'.join(levels)}_days_since_first_sale"]
         .div(df[f"{'_'.join(levels)}_cnt_sale_dts_before_day"])
-        .replace(np.inf, 0)
+        .fillna(0)
     )
     return df
 
@@ -1280,31 +1326,46 @@ def expanding_qty_sold_stats(df, levels):
     df[f"{'_'.join(levels)}_expand_qty_max"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.expanding().max().shift().bfill()
+        lambda x: x.expanding()
+        .max()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_expand_qty_min"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.expanding().min().shift().bfill()
+        lambda x: x.expanding()
+        .min()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_expand_qty_mean"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.expanding().mean().shift().bfill()
+        lambda x: x.expanding()
+        .mean()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_expand_qty_mode"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
+        lambda x: x.expanding()
+        .agg(lambda x: x.value_counts().index[0])
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
 
     df[f"{'_'.join(levels)}_expand_qty_median"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_qty_sold_day"].apply(
-        lambda x: x.expanding().median().shift().bfill()
+        lambda x: x.expanding()
+        .median()
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
     return df
 
@@ -1374,7 +1435,7 @@ def qty_sold_same_day_prev_week(df, levels):
 @Timer(logger=logging.info)
 def expanding_time_bw_sales_stats(df, levels):
     """Create expanding max, min, mean, mode, median and standard deviation of
-    quantity sold values columns, grouped by values of specified column(s).
+    days between sales columns, grouped by values of specified column(s).
 
     Parameters:
     -----------
@@ -1396,32 +1457,35 @@ def expanding_time_bw_sales_stats(df, levels):
     df[f"{'_'.join(levels)}_date_max_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().max().shift().bfill()
+        lambda x: x.expanding().max().shift().fillna(0)
     )
     df[f"{'_'.join(levels)}_date_min_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().min().shift().bfill()
+        lambda x: x.expanding().min().shift().fillna(0)
     )
     df[f"{'_'.join(levels)}_date_avg_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().mean().shift().bfill()
+        lambda x: x.expanding().mean().shift().fillna(0)
     )
     df[f"{'_'.join(levels)}_date_median_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
-    )[f"{'_'.join(levels)}days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().median().shift().bfill()
+    )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
+        lambda x: x.expanding().median().shift().fillna(0)
     )
     df[f"{'_'.join(levels)}_date_mode_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().agg(lambda x: x.value_counts().index[0]).shift().bfill()
+        lambda x: x.expanding()
+        .agg(lambda x: x.value_counts().index[0])
+        .shift()
+        .fillna(0)
     )
     df[f"{'_'.join(levels)}_date_std_gap_bw_sales"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
-        lambda x: x.expanding().std(ddof=0).shift().bfill()
+        lambda x: x.expanding().std(ddof=0).shift().fillna(0)
     )
     df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
     return df
@@ -1489,12 +1553,13 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"
     ].fillna(0, inplace=True)
 
+    first_day = datetime.datetime(*FIRST_DAY_OF_TEST_PRD)
     df = pd.concat(
         [
             df,
-            non_zero_qty_level_dates.query(
-                "date == datetime.datetime(*FIRST_DAY_OF_TEST_PRD)"
-            )[[level + "_id" for level in levels] + ["date"]],
+            non_zero_qty_level_dates.query("date == @first_day")[
+                [level + "_id" for level in levels] + ["date"]
+            ],
         ],
         axis=0,
         ignore_index=True,
@@ -1507,9 +1572,8 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
     df[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"].fillna(method="bfill")
-    df.query(
-        "date != datetime.datetime(*FIRST_DAY_OF_TEST_PRD)", inplace=True
-    ).reset_index(drop=True)
+    df.query("date != @first_day", inplace=True)
+    df.reset_index(drop=True)
     return df
 
 
@@ -1537,7 +1601,8 @@ def num_of_unique_opp_values(df, sales, level):
 
     sales_sorted = sales[col_list].sort_values(by=[level, "date"], ignore_index=True)
 
-    group_dates_w_val_cts = sales_sorted[col_list.remove(level)]
+    col_list.remove(level)
+    group_dates_w_val_cts = sales_sorted[col_list]
     group_dates_w_val_cts.index = [
         sales_sorted[level],
         sales_sorted.groupby(level).cumcount().rename("iidx"),
@@ -1555,8 +1620,7 @@ def num_of_unique_opp_values(df, sales, level):
         .rename(
             columns={
                 "num_unique_values_prior_to_day": f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
-            },
-            axis=1,
+            }
         )
     )
     group_dates_w_val_cts.drop_duplicates(subset=[level, "date"], inplace=True)
@@ -1568,6 +1632,42 @@ def num_of_unique_opp_values(df, sales, level):
     )
 
     df = df.merge(group_dates_w_val_cts, on=[level, "date"], how="left")
+
+    # fill null values on days when no sale was made
+    daily_cts_wo_lag = (
+        sales_sorted.groupby([level, "date"])[
+            [col for col in col_list if col not in (level, "date")][0]
+        ]
+        .expanding()
+        .apply(lambda x: len(set(x)))
+        .reset_index(level=2, drop=True)
+        .reset_index(name="_daily_cts_wo_lag")
+    )
+    df = df.merge(daily_cts_wo_lag, on=[level, "date"], how="left")
+    df[
+        f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+    ] = df[
+        f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+    ].bfill()
+    df["_comb_col"] = np.where(
+        df[
+            f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+        ].isnull(),
+        df[
+            f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+        ],
+        df["_daily_cts_wo_lag"],
+    )
+    df["_comb_col"] = df._comb_col.ffill()
+    df[
+        f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+    ] = df[
+        f"num_unique_{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}_prior_to_day"
+    ].fillna(
+        df._comb_col
+    )
+    df.drop(["_daily_cts_wo_lag", "_comb_col"], axis=1, inplace=True)
+
     return df
 
 
@@ -1647,7 +1747,7 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     )
 
     # pass dataframe through multiple functions to add needed rows and columns
-    (
+    item_date_level_features = (
         item_date_level_features.pipe(add_zero_qty_rows, ["item"])
         .pipe(add_zero_qty_after_last_date_rows, test_df, ["item"])
         .pipe(prev_nonzero_qty_sold, ["item"])
@@ -1676,14 +1776,10 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
 
     # create dataframe with daily totals of quantity sold for each category
     cat_date_total_qty = (
-        (
-            item_date_level_features[["date", "item_category_id", "item_qty_sold_day"]]
-            .groupby("item_category_id")
-            .apply(lambda x: x.resample("D", on="date").item_qty_sold_day.sum())
-        )
-        .stack()
-        .reset_index(name="cat_qty_sold_day")
-    )
+        item_date_level_features[["date", "item_category_id", "item_qty_sold_day"]]
+        .groupby("item_category_id")
+        .apply(lambda x: x.resample("D", on="date").item_qty_sold_day.sum())
+    ).reset_index(name="cat_qty_sold_day")
 
     # calculate rolling weekly sum of quantity sold for each category, excluding current date
     cat_date_total_qty["cat_qty_sold_last_7d"] = cat_date_total_qty.groupby(
@@ -1697,55 +1793,42 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         how="left",
     )
 
-    # create dataframe with daily lists of items sold for each category
-    cat_date_item_lists = (
-        item_date_level_features[["date", "item_category_id", "item_id"]]
-        .groupby("item_category_id")
-        .apply(lambda x: x.set_index("date").item_id.agg(list))
+    cat_date_item_cts = (
+        item_date_level_features[
+            ["item_category_id", "date", "item_id", "item_qty_sold_day"]
+        ]
+        .set_index("date")
+        .sort_values(by=["item_category_id", "date"])
+    )
+
+    cat_date_item_cts["item_id_mdfd"] = np.where(
+        cat_date_item_cts.item_qty_sold_day <= 0, -999, cat_date_item_cts.item_id
+    )
+    cat_date_item_cts.drop("item_qty_sold_day", axis=1, inplace=True)
+
+    cat_date_item_cts = (
+        cat_date_item_cts.groupby("item_category_id")["item_id_mdfd"]
+        .rolling("7D")
+        .apply(
+            lambda x: np.unique(np.ma.MaskedArray(x, mask=(np.array(x < 0)))).count(),
+            raw=True,
+        )
+        .reset_index(name="cat_unique_items_sold_last_7d")
+        .drop_duplicates(["item_category_id", "date"], keep="last")
+    )
+
+    cat_date_item_cts = (
+        cat_date_item_cts.groupby("item_category_id")
+        .apply(lambda x: x.set_index("date").resample("D").asfreq())
+        .drop("item_category_id", axis=1)
         .reset_index()
-        .rename(columns={0: "item_list"})
     )
+    cat_date_item_cts["cat_unique_items_sold_last_7d"] = cat_date_item_cts.groupby(
+        "item_category_id"
+    ).cat_unique_items_sold_last_7d.apply(lambda x: x.ffill().shift().fillna(0))
 
-    # create column with rolling weekly count of unique items sold for each category, excluding current date
-
-    cat_grouped = cat_date_item_lists.groupby("item_category_id")
-    cat_date_item_lists["cat_unique_items_sold_last_7d"] = np.nan
-
-    # iterate over each group
-    for cat_name, cat_group in cat_grouped:
-        cat_group_dt_idx = cat_group.set_index("date")
-        # list to hold rolling accumulated lists of items for rolling 1-week period
-        rolllists = []
-        # iterate over rows within each group
-        for row_index, _ in cat_group_dt_idx.iterrows():
-            # list to hold accumulated list for one day, including day of
-            res = []
-            for d in pd.date_range(
-                start=max(
-                    cat_group_dt_idx.index.min() - datetime.timedelta(1),
-                    row_index - datetime.timedelta(7),
-                ),
-                end=row_index - datetime.timedelta(1),
-            ):
-                res.append(cat_group_dt_idx.loc[d + datetime.timedelta(1), "item_list"])
-            rolllists.append(res)
-        for idx, li in enumerate(rolllists):
-            li = [item for sublist in li for item in sublist]
-            rolllists[idx] = len({*li})
-        cat_date_item_lists.loc[
-            cat_date_item_lists.item_category_id == cat_name,
-            "cat_unique_items_sold_last_7d",
-        ] = rolllists
-
-    cat_date_item_lists["cat_unique_items_sold_last_7d"] = (
-        cat_date_item_lists.groupby("item_category_id")["cat_unique_items_sold_last_7d"]
-        .shift()
-        .fillna(0)
-    )
-
-    # merge rolling weekly category-grouped counts of unique items onto item-date dataset
     item_date_level_features = item_date_level_features.merge(
-        cat_date_item_lists[
+        cat_date_item_cts[
             ["item_category_id", "date", "cat_unique_items_sold_last_7d"]
         ],
         on=["item_category_id", "date"],
@@ -1756,7 +1839,7 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     item_date_level_features["cat_qty_sold_per_item_last_7d"] = (
         item_date_level_features["cat_qty_sold_last_7d"]
         .div(item_date_level_features["cat_unique_items_sold_last_7d"])
-        .replace(np.inf, 0)
+        .replace([np.inf, np.nan], 0)
     )
 
     # Presence of Spikes in Quantity Sold
@@ -1765,57 +1848,18 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     res = (
         item_date_level_features.groupby("item_id")["item_qty_sold_day"]
         .expanding()
-        .apply(
-            lambda x: any(
-                (
-                    v
-                    > (
-                        bn.nanmedian(
-                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
-                        )
-                        + 2
-                        * bn.nanstd(
-                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
-                        )
-                    )
-                )
-                for v in x[:-1]
-            ),
-            raw=True,
-        )
+        .apply(_spike_check, raw=True)
+        .values
     )
-    item_date_level_features["item_had_spike_before_day"] = np.where(res == 1, 1, 0)
+    item_date_level_features["item_had_spike_before_day"] = res.astype(bool).astype(
+        np.int8
+    )
 
     # column with count of spikes in quantity sold before current day
-
-    res = (
-        item_date_level_features.groupby("item_id")["item_qty_sold_day"]
-        .expanding()
-        .apply(
-            lambda x: sum(
-                (
-                    v
-                    > (
-                        bn.nanmedian(
-                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
-                        )
-                        + 2
-                        * bn.nanstd(
-                            np.ma.MaskedArray(x[:-1], mask=(np.array(x[:-1]) == 0))
-                        )
-                    )
-                )
-                for v in x[:-1]
-            ),
-            raw=True,
-        )
-    ).reset_index(level=0, drop=True)
-    item_date_level_features["item_had_spike_before_day"] = res
+    item_date_level_features["item_n_spikes_before_day"] = res.astype(np.int8)
 
     item_date_level_features = _downcast(item_date_level_features)
     item_date_level_features = _add_col_prefix(item_date_level_features, "id_")
-
-    item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
 
     logging.info(
         f"Item-date-level dataframe has {item_date_level_features.shape[0]} rows and "
@@ -1835,6 +1879,7 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         )
 
     if to_sql:
+        item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(item_date_level_features, "item_dates")
 
     if return_df:
@@ -1881,7 +1926,7 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     )
 
     # pass dataframe through multiple functions to add needed rows and columns
-    (
+    shop_date_level_features = (
         shop_date_level_features.pipe(add_zero_qty_rows, ["shop"])
         .pipe(add_zero_qty_after_last_date_rows, test_df, ["shop"])
         .pipe(prev_nonzero_qty_sold, ["shop"])
@@ -1923,8 +1968,7 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         .rename(
             columns={
                 "num_unique_values_prior_to_day": "num_unique_item_cats_prior_to_day"
-            },
-            axis=1,
+            }
         )
     )
     shop_dates_w_item_cat_cts.drop_duplicates(subset=["shop_id", "date"], inplace=True)
@@ -1935,10 +1979,37 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         shop_dates_w_item_cat_cts, on=["shop_id", "date"], how="left"
     )
 
+    # fill null values on days when no sale was made
+    daily_cts_wo_lag = (
+        sales_sorted.groupby(["shop_id", "date"])["item_category_id"]
+        .expanding()
+        .apply(lambda x: len(set(x)))
+        .reset_index(level=2, drop=True)
+        .reset_index(name="_daily_cts_wo_lag")
+    )
+    shop_date_level_features = shop_date_level_features.merge(
+        daily_cts_wo_lag, on=["shop_id", "date"], how="left"
+    )
+    shop_date_level_features[
+        "num_unique_item_cats_prior_to_day"
+    ] = shop_date_level_features["num_unique_item_cats_prior_to_day"].bfill()
+    shop_date_level_features["_comb_col"] = np.where(
+        shop_date_level_features["num_unique_item_cats_prior_to_day"].isnull(),
+        shop_date_level_features["num_unique_item_cats_prior_to_day"],
+        shop_date_level_features["_daily_cts_wo_lag"],
+    )
+    shop_date_level_features["_comb_col"] = shop_date_level_features._comb_col.ffill()
+    shop_date_level_features[
+        "num_unique_item_cats_prior_to_day"
+    ] = shop_date_level_features["num_unique_item_cats_prior_to_day"].fillna(
+        shop_date_level_features._comb_col
+    )
+    shop_date_level_features.drop(
+        ["_daily_cts_wo_lag", "_comb_col"], axis=1, inplace=True
+    )
+
     shop_date_level_features = _downcast(shop_date_level_features)
     shop_date_level_features = _add_col_prefix(shop_date_level_features, "sd_")
-
-    shop_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
 
     logging.info(
         f"Shop-date-level dataframe has {shop_date_level_features.shape[0]} rows and "
@@ -1958,6 +2029,7 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         )
 
     if to_sql:
+        shop_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(shop_date_level_features, "shop_dates")
 
     if return_df:
@@ -2021,7 +2093,7 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
     )
 
     # pass dataframe through multiple functions to add needed rows and columns
-    (
+    shop_item_date_level_features = (
         shop_item_date_level_features.pipe(add_zero_qty_rows, ["shop", "item"])
         .pipe(add_zero_qty_after_last_date_rows, test_df, ["shop", "item"])
         .pipe(prev_nonzero_qty_sold, ["shop", "item"])
@@ -2115,8 +2187,6 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         shop_item_date_level_features, "sid_"
     )
 
-    shop_item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
-
     logging.info(
         f"Shop-item-date dataframe has {shop_item_date_level_features.shape[0]} "
         f"rows and {shop_item_date_level_features.shape[1]} columns."
@@ -2135,6 +2205,9 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         )
 
     if to_sql:
+        shop_item_date_level_features.rename(
+            columns={"date": "sale_date"}, inplace=True
+        )
         write_df_to_sql(shop_item_date_level_features, "shop_item_dates")
 
     if return_df:
@@ -2142,6 +2215,36 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "command",
+        metavar="<command>",
+        help="'clean', 'shops', 'items', 'dates', 'item-dates', 'shop-dates' or 'shop-item-dates'",
+    )
+    parser.add_argument(
+        "--send_to_sql",
+        default=False,
+        action="store_true",
+        help="write DF to SQL (if included) or not (if not included)",
+    )
+
+    args = parser.parse_args()
+
+    if args.command not in [
+        "clean",
+        "shops",
+        "items",
+        "dates",
+        "item-dates",
+        "shop-dates",
+        "shop-item-dates",
+    ]:
+        print(
+            "'{}' is not recognized. "
+            "Use 'clean', 'shops', 'items', 'dates', 'item-dates' "
+            "'shop-dates' or 'shop-item-dates'".format(args.command)
+        )
+
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     log_dir_file = f"./logging_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.log"
@@ -2160,19 +2263,6 @@ def main():
     logger.info(f"The pandas version is {pd.__version__}.")
     logger.info(f"The numpy version is {np.__version__}.")
     logger.info(f"The scipy version is {scipy.__version__}.")
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "command", metavar="<command>", help="'clean', 'shops', 'items', 'dates', 'item-dates', 'shop-dates' or 'shop-item-dates'",
-    )
-    parser.add_argument(
-        "--send_to_sql",
-        default=False,
-        action="store_true",
-        help="write DF to SQL (if included) or not (if not included)",
-    )
-
-    args = parser.parse_args()
 
     # Load data
     data_path = "./Data/competitive-data-science-predict-future-sales/"
@@ -2208,19 +2298,13 @@ def main():
     elif args.command == "items":
         build_item_lvl_features(items_df, categories_df, to_sql=args.send_to_sql)
     elif args.command == "dates":
-        build_date_lvl_features(macro_df, ps4games, sales, to_sql=args.send_to_sql)
+        build_date_lvl_features(macro_df, ps4games, to_sql=args.send_to_sql)
     elif args.command == "item-dates":
         build_item_date_lvl_features(test_df, items_df, to_sql=args.send_to_sql)
     elif args.command == "shop-dates":
         build_shop_date_lvl_features(test_df, items_df, to_sql=args.send_to_sql)
     elif args.command == "shop-item-dates":
         build_shop_item_date_lvl_features(test_df, items_df, to_sql=args.send_to_sql)
-    else:
-        print(
-            "'{}' is not recognized. "
-            "Use 'clean', 'shops', 'items', 'dates', 'item-dates' "
-            "'shop-dates' or 'shop-item-dates'".format(args.command)
-        )
 
 
 if __name__ == "__main__":
