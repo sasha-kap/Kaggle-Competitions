@@ -345,6 +345,15 @@ def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
         shops_df[shops_df.city == "Интернет-магазин"].index, ["n_other_stores_in_city"]
     ] = np.nan
 
+    # assign values of physical features of Moscow-based shops to the two online stores
+    moscow_shop_features = (
+        shops_df.query("city == 'Москва'")
+        .head(1)
+        .drop(["shop_name", "city", "shop_id", "online_store"], axis=1)
+        .to_dict(orient="records")[0]
+    )
+    shops_df.fillna(moscow_shop_features, inplace=True)
+
     shops_df = _downcast(shops_df)
     shops_df = _add_col_prefix(shops_df, "s_")
 
@@ -826,10 +835,10 @@ def build_date_lvl_features(macro_df, ps4games, return_df=False, to_sql=False):
     for shift_val in [1, 6, 7]:
         date_level_features[
             f"day_total_qty_sold_{shift_val}day_lag"
-        ] = date_level_features.day_total_qty_sold.shift(shift_val)
+        ] = date_level_features.day_total_qty_sold.shift(shift_val).fillna(0)
 
     # create column for 1-day lagged brent price (based on the results of cross-correlation analysis)
-    date_level_features["brent_1day_lag"] = date_level_features.brent.shift(1)
+    date_level_features["brent_1day_lag"] = date_level_features.brent.shift(1).fillna(0)
 
     date_level_features = _downcast(date_level_features)
     date_level_features = _add_col_prefix(date_level_features, "d_")
@@ -928,6 +937,24 @@ def _spike_check(arr):
     ):
         return 0
     return (masked_arr - np.ma.median(masked_arr) > 2 * np.ma.std(masked_arr)).sum()
+
+
+def _mode(ser):
+    """Compute the mode of a pandas Series, with the largest value chosen if
+    multiple modes are found.
+
+    Parameters:
+    -----------
+    ser : pandas Series
+        Series for which mode is to be calculated
+
+    Returns:
+    --------
+    int (scalar)
+        Mode of the series
+    """
+    vc = ser.value_counts()
+    return vc[vc == vc.max()].sort_index(ascending=False).index[0]
 
 
 @Timer(logger=logging.info)
@@ -2114,22 +2141,89 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
 
     # Expanding Coefficient of Variation of item price (across all dates for shop-item before current date)
 
-    shop_item_date_level_features["coef_var_price"] = sales.groupby(
-        ["shop_id", "item_id"]
-    )["item_price"].apply(lambda x: x.expanding().agg(variation).shift().bfill())
+    # expanding coefficient of variation of price across dates with a sale for each shop-item
+    coefs_var = (
+        sales.groupby(["shop_id", "item_id"])["item_price"]
+        .expanding()
+        .agg(variation)
+        .reset_index(name="coef_var_price")
+        .drop("level_2", axis=1)
+    )
+
+    # add date column
+    coefs_var = pd.concat([coefs_var, sales[["date"]]], axis=1)
+
+    # merge with main dataset
+    shop_item_date_level_features = shop_item_date_level_features.merge(
+        coefs_var, on=["shop_id", "item_id", "date"], how="left"
+    )
+
+    # shift values of coefficient of variation by one day
+    # forward fill null values, so most recent non-null value is used for days without a sale
+    # then, fill first date with sale with 0's
+    shop_item_date_level_features["coef_var_price"] = (
+        shop_item_date_level_features.groupby(["shop_id", "item_id"])
+        .coef_var_price.shift()
+        .ffill()
+        .fillna(0)
+    )
 
     # Expanding Mean Absolute Deviation of Quantity Sold (across all shop-items before current date)
 
-    shop_item_date_level_features["quant_mean_abs_dev"] = sales.groupby(
-        ["shop_id", "item_id"]
-    )["item_cnt_day"].apply(lambda x: x.expanding().agg(_mad).shift().bfill())
+    # expanding Mean Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
+    qty_mads = (
+        sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
+        .expanding()
+        .agg(_mad)
+        .reset_index(name="qty_mean_abs_dev")
+        .drop("level_2", axis=1)
+    )
+
+    # add date column
+    qty_mads = pd.concat([qty_mads, sales[["date"]]], axis=1)
+
+    # merge with main dataset
+    shop_item_date_level_features = shop_item_date_level_features.merge(
+        qty_mads, on=["shop_id", "item_id", "date"], how="left"
+    )
+
+    # shift values of absolute deviation by one day
+    # forward fill null values, so most recent non-null value is used for days without a sale
+    # then, fill first date with sale with 0's
+    shop_item_date_level_features["qty_mean_abs_dev"] = (
+        shop_item_date_level_features.groupby(["shop_id", "item_id"])
+        .qty_mean_abs_dev.shift()
+        .ffill()
+        .fillna(0)
+    )
 
     # Expanding Median Absolute Deviation of Quantity Sold (across all shop-items before current date)
 
-    shop_item_date_level_features["quant_median_abs_dev"] = sales.groupby(
-        ["shop_id", "item_id"]
-    )["item_cnt_day"].apply(
-        lambda x: x.expanding().agg(median_absolute_deviation).shift().bfill()
+    # expanding Median Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
+    qty_median_ads = (
+        sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
+        .expanding()
+        .agg(median_absolute_deviation)
+        .reset_index(name="qty_median_abs_dev")
+        .drop("level_2", axis=1)
+    )
+
+    # add date column
+    qty_median_ads = pd.concat([qty_median_ads, sales[["date"]]], axis=1)
+
+    # merge with main dataset
+    shop_item_date_level_features = shop_item_date_level_features.merge(
+        qty_median_ads, on=["shop_id", "item_id", "date"], how="left"
+    )
+
+    # shift values of absolute deviation by one day
+    # forward fill null values, so most recent non-null value is used for days without a sale
+    # then, fill first date with sale with 0's
+    shop_item_date_level_features["qty_median_abs_dev"] = (
+        shop_item_date_level_features.groupby(["shop_id", "item_id"])
+        .qty_median_abs_dev.shift()
+        .ffill()
+        .fillna(0)
     )
 
     # Demand for Category in Last Week (Quantity Sold)
