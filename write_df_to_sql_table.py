@@ -1,4 +1,5 @@
 import csv
+import logging
 from io import StringIO
 
 from sqlalchemy import create_engine
@@ -6,6 +7,7 @@ import psycopg2
 
 # Import the 'config' function from the config.py file
 from config import config
+from timer import Timer
 
 
 def psql_insert_copy(table, conn, keys, data_iter):
@@ -58,6 +60,7 @@ def chunker(seq, size):
     return (seq[pos:pos + size] for pos in range(0, len(seq), size))
 
 
+@Timer(logger=logging.info)
 def write_df_to_sql(df, table_name):
     '''Write pandas DataFrame object to PostgreSQL table, while displaying
     progress bar. Rows will be written in chunks of up to 10,000 rows max.

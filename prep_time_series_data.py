@@ -2341,7 +2341,11 @@ def main():
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-    log_dir_file = f"./logging_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.log"
+    log_dir = Path.cwd().joinpath('logs')
+    path = Path(log_dir)
+    path.mkdir(exist_ok=True)
+    log_fname = f"logging_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}_{args.command}.log"
+    log_path = log_dir.joinpath(log_fname)
 
     logging.basicConfig(
         level=logging.DEBUG,
