@@ -4,6 +4,7 @@ from io import StringIO
 
 from sqlalchemy import create_engine
 import psycopg2
+from tqdm import tqdm
 
 # Import the 'config' function from the config.py file
 from config import config

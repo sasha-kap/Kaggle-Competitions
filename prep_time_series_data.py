@@ -25,14 +25,15 @@ import platform
 import warnings
 
 # Third-party library imports
+import boto3
 import numpy as np
 import pandas as pd
-import scipy
+# import scipy
 from scipy.stats import median_absolute_deviation, variation
 from tqdm import tqdm
 
 # Local imports
-from constants import (
+from dateconstants import (
     FIRST_DAY_OF_TRAIN_PRD,
     LAST_DAY_OF_TRAIN_PRD,
     FIRST_DAY_OF_TEST_PRD,
@@ -46,6 +47,22 @@ from timer import Timer
 from write_df_to_sql_table import psql_insert_copy, write_df_to_sql
 
 warnings.filterwarnings("ignore")
+
+def upload_file(file_name, bucket, object_name):
+    """Upload a file to an S3 bucket
+
+    :param file_name: File to upload
+    :param bucket: Bucket to upload to
+    :param object_name: S3 object name. If not specified then file_name is used
+    :return: True if file was uploaded, else False
+    """
+
+    s3 = boto3.resource('s3')
+    try:
+        response = s3.meta.client.upload_file(file_name, bucket, object_name)
+    except ClientError as e:
+        return False
+    return True
 
 # Downcast Numeric Columns to Reduce Memory Usage
 # from https://hackersandslackers.com/downcast-numerical-columns-python-pandas/
@@ -2352,7 +2369,7 @@ def main():
         filemode="w",
         format=fmt,
         datefmt=datefmt,
-        filename=log_dir_file,
+        filename=log_path,
     )
 
     logger = logging.getLogger()
@@ -2360,7 +2377,7 @@ def main():
     logger.info(f"The Python version is {platform.python_version()}.")
     logger.info(f"The pandas version is {pd.__version__}.")
     logger.info(f"The numpy version is {np.__version__}.")
-    logger.info(f"The scipy version is {scipy.__version__}.")
+    # logger.info(f"The scipy version is {scipy.__version__}.")
 
     # Load data
     data_path = "./Data/competitive-data-science-predict-future-sales/"
@@ -2404,6 +2421,8 @@ def main():
     elif args.command == "shop-item-dates":
         build_shop_item_date_lvl_features(test_df, items_df, to_sql=args.send_to_sql)
 
+    # copy log file to S3 bucket
+    upload_file(f"./logs/{log_fname}", "my-ec2-logs", log_fname)
 
 if __name__ == "__main__":
     main()
