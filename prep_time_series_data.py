@@ -28,7 +28,6 @@ import warnings
 import boto3
 import numpy as np
 import pandas as pd
-# import scipy
 from scipy.stats import median_absolute_deviation, variation
 from tqdm import tqdm
 
@@ -43,6 +42,7 @@ from dateconstants import (
     WORLDCUP2014,
     CITY_POP,
 )
+from rds_instance_mgmt import start_instance, stop_instance
 from timer import Timer
 from write_df_to_sql_table import psql_insert_copy, write_df_to_sql
 
@@ -204,7 +204,8 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
     sales.to_csv("sales_cleaned.csv", index=False)
 
     logging.info(
-        f"Sales dataframe has {sales.shape[0]} rows and " f"{sales.shape[1]} columns."
+        f"Sales dataframe has {sales.shape[0]} rows and "
+        f"{sales.shape[1]} columns."
     )
     nl = "\n" + " " * 50
     logging.info(
@@ -220,6 +221,7 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
         )
 
     if to_sql:
+        start_instance()
         sales.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(sales, "sales_cleaned")
 
@@ -392,6 +394,7 @@ def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
         )
 
     if to_sql:
+        start_instance()
         write_df_to_sql(shops_df, "shops")
 
     if return_df:
@@ -535,6 +538,7 @@ def build_item_lvl_features(items_df, categories_df, return_df=False, to_sql=Fal
         )
 
     if to_sql:
+        start_instance()
         write_df_to_sql(item_level_features, "items")
 
     if return_df:
@@ -665,7 +669,7 @@ def build_date_lvl_features(macro_df, ps4games, return_df=False, to_sql=False):
     # Days in Month
 
     # create days in month column
-    days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31])
+    days = pd.Series([31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]).to_dict()
     date_level_features["days_in_mon"] = (
         date_level_features["month"].map(days).astype(np.int8)
     )
@@ -878,6 +882,7 @@ def build_date_lvl_features(macro_df, ps4games, return_df=False, to_sql=False):
         )
 
     if to_sql:
+        start_instance()
         date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(date_level_features, "dates")
 
@@ -1430,49 +1435,11 @@ def qty_sold_x_days_before(df, levels):
     df : pandas DataFrame
         Updated dataframe
     """
-    for shift_val in [1, 2, 3]:
+    for shift_val in [1, 2, 3, 7]:
         df[f"{'_'.join(levels)}_qty_sold_{shift_val}d_ago"] = df.groupby(
             [level + "_id" for level in levels]
         )[f"{'_'.join(levels)}_qty_sold_day"].shift(shift_val)
         df[f"{'_'.join(levels)}_qty_sold_{shift_val}d_ago"].fillna(0, inplace=True)
-    return df
-
-
-@Timer(logger=logging.info)
-def qty_sold_same_day_prev_week(df, levels):
-    """Create column for quantity sold same day previous week.
-
-    Parameters:
-    -----------
-    df : pandas DataFrame
-        Dataframe in which to create new column (dataframe will be modified inplace)
-    levels : list of strings
-        List of levels by which to group values (e.g., ['shop', 'item'])
-
-    Returns:
-    --------
-    df : pandas DataFrame
-        Updated dataframe
-    """
-    col_list = (
-        [level + "_id" for level in levels]
-        + ["date"]
-        + [f"{'_'.join(levels)}_qty_sold_day"]
-    )
-    date_plus7_df = df[col_list]
-    date_plus7_df["date_plus7"] = date_plus7_df["date"] + datetime.timedelta(days=7)
-
-    date_plus7_df.drop(columns="date", inplace=True)
-    date_plus7_df.rename(
-        columns={
-            f"{'_'.join(levels)}_qty_sold_day": f"{'_'.join(levels)}_qty_sold_last_dow",
-            "date_plus7": "date",
-        },
-        inplace=True,
-    )
-
-    df = df.merge(date_plus7_df, on=col_list[:-1], how="left")
-    df[f"{'_'.join(levels)}_qty_sold_last_dow"].fillna(0, inplace=True)
     return df
 
 
@@ -1531,7 +1498,7 @@ def expanding_time_bw_sales_stats(df, levels):
     )[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"].apply(
         lambda x: x.expanding().std(ddof=0).shift().fillna(0)
     )
-    df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
+    # df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
     return df
 
 
@@ -1617,7 +1584,7 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"].fillna(method="bfill")
     df.query("date != @first_day", inplace=True)
-    df.reset_index(drop=True)
+    df.reset_index(drop=True, inplace=True)
     return df
 
 
@@ -1686,6 +1653,7 @@ def num_of_unique_opp_values(df, sales, level):
         .apply(lambda x: len(set(x)))
         .reset_index(level=2, drop=True)
         .reset_index(name="_daily_cts_wo_lag")
+        .drop_duplicates([level, "date"], keep="last")
     )
     df = df.merge(daily_cts_wo_lag, on=[level, "date"], how="left")
     df[
@@ -1902,7 +1870,7 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     # column with count of spikes in quantity sold before current day
     item_date_level_features["item_n_spikes_before_day"] = res.astype(np.int8)
 
-    item_date_level_features = _downcast(item_date_level_features)
+    # item_date_level_features = _downcast(item_date_level_features)
     item_date_level_features = _add_col_prefix(item_date_level_features, "id_")
 
     logging.info(
@@ -1923,8 +1891,10 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         )
 
     if to_sql:
+        start_instance()
         item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(item_date_level_features, "item_dates")
+        stop_instance()
 
     if return_df:
         return item_date_level_features
@@ -2030,6 +2000,7 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         .apply(lambda x: len(set(x)))
         .reset_index(level=2, drop=True)
         .reset_index(name="_daily_cts_wo_lag")
+        .drop_duplicates(["shop_id", "date"], keep="last")
     )
     shop_date_level_features = shop_date_level_features.merge(
         daily_cts_wo_lag, on=["shop_id", "date"], how="left"
@@ -2052,7 +2023,7 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         ["_daily_cts_wo_lag", "_comb_col"], axis=1, inplace=True
     )
 
-    shop_date_level_features = _downcast(shop_date_level_features)
+    # shop_date_level_features = _downcast(shop_date_level_features)
     shop_date_level_features = _add_col_prefix(shop_date_level_features, "sd_")
 
     logging.info(
@@ -2073,8 +2044,10 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         )
 
     if to_sql:
+        start_instance()
         shop_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
         write_df_to_sql(shop_date_level_features, "shop_dates")
+        stop_instance()
 
     if return_df:
         return shop_date_level_features
@@ -2293,7 +2266,7 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         how="left",
     )
 
-    shop_item_date_level_features = _downcast(shop_item_date_level_features)
+    # shop_item_date_level_features = _downcast(shop_item_date_level_features)
     shop_item_date_level_features = _add_col_prefix(
         shop_item_date_level_features, "sid_"
     )
@@ -2316,10 +2289,12 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         )
 
     if to_sql:
+        start_instance()
         shop_item_date_level_features.rename(
             columns={"date": "sale_date"}, inplace=True
         )
         write_df_to_sql(shop_item_date_level_features, "shop_item_dates")
+        stop_instance()
 
     if return_df:
         return shop_item_date_level_features
@@ -2377,7 +2352,6 @@ def main():
     logger.info(f"The Python version is {platform.python_version()}.")
     logger.info(f"The pandas version is {pd.__version__}.")
     logger.info(f"The numpy version is {np.__version__}.")
-    # logger.info(f"The scipy version is {scipy.__version__}.")
 
     # Load data
     data_path = "./Data/competitive-data-science-predict-future-sales/"
