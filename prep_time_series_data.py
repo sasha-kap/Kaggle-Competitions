@@ -19,6 +19,7 @@ Usage: run from the command line as such:
 # Standard library imports
 import argparse
 import datetime
+import gc
 import logging
 from pathlib import Path
 import platform
@@ -26,6 +27,7 @@ import warnings
 
 # Third-party library imports
 import boto3
+from memory_profiler import profile
 import numpy as np
 import pandas as pd
 from scipy.stats import median_absolute_deviation, variation
@@ -47,6 +49,8 @@ from timer import Timer
 from write_df_to_sql_table import psql_insert_copy, write_df_to_sql
 
 warnings.filterwarnings("ignore")
+
+f=open('memory_profiler_sid4.log','w+')
 
 def upload_file(file_name, bucket, object_name):
     """Upload a file to an S3 bucket
@@ -979,7 +983,8 @@ def _mode(ser):
     return vc[vc == vc.max()].sort_index(ascending=False).index[0]
 
 
-@Timer(logger=logging.info)
+# @Timer(logger=logging.info)
+@profile(stream=f)
 def add_zero_qty_rows(df, levels):
     """Add new (missing) rows between first and last dates of observed sales for
     each value of levels, with 0 values for quantity sold.
@@ -1009,7 +1014,14 @@ def add_zero_qty_rows(df, levels):
     return df
 
 
-@Timer(logger=logging.info)
+def _addl_dts(df):
+    return df.set_index("date").resample("D").asfreq().reset_index().values.flatten()
+
+def _drop_first_row(df):
+    return df.iloc[1:,]
+
+# @Timer(logger=logging.info)
+@profile(stream=f)
 def add_zero_qty_after_last_date_rows(df, test_df, levels):
     """Add new (missing) rows between last observed sale date and last day of
     the training period for each value of levels and only for levels that exist
@@ -1051,27 +1063,58 @@ def add_zero_qty_after_last_date_rows(df, test_df, levels):
         .to_frame()
         .rename(columns={0: "date"})
     )
-    addl_dates = addl_dates.groupby(addl_dates.index).apply(
-        lambda x: x.set_index("date").resample("D").asfreq()
-    )
-    addl_dates.reset_index(inplace=True)
-    if len(levels) == 2:
-        addl_dates[levels[0] + "_id"], addl_dates[levels[1] + "_id"] = zip(
-            *addl_dates.level_0
-        )
-        addl_dates.drop("level_0", axis=1, inplace=True)
+    del last_levels_dts_in_train_data
+
+    results = []
+    for i, (g, grp) in enumerate(addl_dates.groupby(addl_dates.index)):
+        if i % 25 == 0:
+            gc.collect()
+        if len(levels) == 2:
+            results.append((*g, _addl_dts(grp)))
+        else:
+            results.append((g, _addl_dts(grp)))
+
+    addl_dates = pd.DataFrame(results, columns=[level + "_id" for level in levels] + ["date"])
+    addl_dates = addl_dates.explode('date').reset_index(drop=True)
+    del results
+
+    # g = addl_dates.groupby(addl_dates.index)
+    # addl_dates = g.apply(
+    #     lambda x: x.set_index("date").resample("D").asfreq()
+    # ).reset_index()
+    # del g
+
+    # addl_dates = addl_dates.groupby(addl_dates.index).apply(
+    #     lambda x: x.set_index("date").resample("D").asfreq()
+    # ).reset_index()
+
+    # if len(levels) == 2:
+    #     addl_dates[levels[0] + "_id"], addl_dates[levels[1] + "_id"] = zip(
+    #         *addl_dates.level_0
+    #     )
+    #     addl_dates.drop("level_0", axis=1, inplace=True)
+
     first_day = datetime.datetime(*FIRST_DAY_OF_TEST_PRD)
     addl_dates.query("date != @first_day", inplace=True)
-    addl_dates = addl_dates.groupby([level + "_id" for level in levels]).apply(
-        lambda group: group.iloc[1:,]
-    )
-    addl_dates.reset_index(drop=True, inplace=True)
+
+    results = []
+    for i, (g, grp) in enumerate(addl_dates.groupby([level + "_id" for level in levels])):
+        if i % 25 == 0:
+            gc.collect()
+        results.append(_drop_first_row(grp))
+    addl_dates = pd.concat(results, ignore_index=True)
+    del results
+
+    # addl_dates = addl_dates.groupby([level + "_id" for level in levels]).apply(
+    #     lambda group: group.iloc[1:,]
+    # ).reset_index(drop=True)
 
     addl_dates = addl_dates.merge(
         test_levels, on=[level + "_id" for level in levels], how="inner"
     )
 
     df = pd.concat([df, addl_dates], axis=0, ignore_index=True)
+    del addl_dates
     df.sort_values(
         by=[level + "_id" for level in levels] + ["date"],
         inplace=True,
@@ -1583,8 +1626,7 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
     df[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"] = df.groupby(
         [level + "_id" for level in levels]
     )[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"].fillna(method="bfill")
-    df.query("date != @first_day", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+    df = df.query("date != @first_day").reset_index(drop=True)
     return df
 
 
@@ -1772,7 +1814,6 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         .pipe(expanding_avg_demand_int, ["item"])
         .pipe(expanding_qty_sold_stats, ["item"])
         .pipe(qty_sold_x_days_before, ["item"])
-        .pipe(qty_sold_same_day_prev_week, ["item"])
         .pipe(expanding_time_bw_sales_stats, ["item"])
         .pipe(diff_bw_last_and_sec_to_last_qty, ["item"])
         .pipe(num_of_unique_opp_values, sales, "item_id")
@@ -1951,7 +1992,6 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
         .pipe(rolling_7d_qty_stats, ["shop"])
         .pipe(expanding_qty_sold_stats, ["shop"])
         .pipe(qty_sold_x_days_before, ["shop"])
-        .pipe(qty_sold_same_day_prev_week, ["shop"])
         .pipe(expanding_time_bw_sales_stats, ["shop"])
         .pipe(diff_bw_last_and_sec_to_last_qty, ["shop"])
         .pipe(num_of_unique_opp_values, sales, "shop_id")
@@ -2071,7 +2111,8 @@ def _mad(data, axis=None):
 
 
 # SHOP-ITEM-DATE-LEVEL FEATURES
-@Timer(logger=logging.info)
+# @Timer(logger=logging.info)
+@profile(stream=f)
 def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=False):
     """Build dataframe of shop-item-date-level features.
 
@@ -2113,163 +2154,162 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
     shop_item_date_level_features = (
         shop_item_date_level_features.pipe(add_zero_qty_rows, ["shop", "item"])
         .pipe(add_zero_qty_after_last_date_rows, test_df, ["shop", "item"])
-        .pipe(prev_nonzero_qty_sold, ["shop", "item"])
-        .pipe(days_elapsed_since_prev_sale, ["shop", "item"])
-        .pipe(days_elapsed_since_first_sale, ["shop", "item"])
-        .pipe(first_week_month_of_sale, ["shop", "item"])
-        .pipe(num_of_sale_dts_in_prev_x_days, ["shop", "item"])
-        .pipe(rolling_7d_qty_stats, ["shop", "item"])
-        .pipe(expanding_cv2_of_qty, ["shop", "item"])
-        .pipe(expanding_avg_demand_int, ["shop", "item"])
-        .pipe(expanding_qty_sold_stats, ["shop", "item"])
-        .pipe(qty_sold_x_days_before, ["shop", "item"])
-        .pipe(qty_sold_same_day_prev_week, ["shop", "item"])
-        .pipe(expanding_time_bw_sales_stats, ["shop", "item"])
-        .pipe(diff_bw_last_and_sec_to_last_qty, ["shop", "item"])
-        .pipe(days_since_max_qty_sold, ["shop", "item"])
+        # .pipe(prev_nonzero_qty_sold, ["shop", "item"])
+        # .pipe(days_elapsed_since_prev_sale, ["shop", "item"])
+        # .pipe(days_elapsed_since_first_sale, ["shop", "item"])
+        # .pipe(first_week_month_of_sale, ["shop", "item"])
+        # .pipe(num_of_sale_dts_in_prev_x_days, ["shop", "item"])
+        # .pipe(rolling_7d_qty_stats, ["shop", "item"])
+        # .pipe(expanding_cv2_of_qty, ["shop", "item"])
+        # .pipe(expanding_avg_demand_int, ["shop", "item"])
+        # .pipe(expanding_qty_sold_stats, ["shop", "item"])
+        # .pipe(qty_sold_x_days_before, ["shop", "item"])
+        # .pipe(expanding_time_bw_sales_stats, ["shop", "item"])
+        # .pipe(diff_bw_last_and_sec_to_last_qty, ["shop", "item"])
+        # .pipe(days_since_max_qty_sold, ["shop", "item"])
     )
 
-    # Expanding Coefficient of Variation of item price (across all dates for shop-item before current date)
-
-    # expanding coefficient of variation of price across dates with a sale for each shop-item
-    coefs_var = (
-        sales.groupby(["shop_id", "item_id"])["item_price"]
-        .expanding()
-        .agg(variation)
-        .reset_index(name="coef_var_price")
-        .drop("level_2", axis=1)
-    )
-
-    # add date column
-    coefs_var = pd.concat([coefs_var, sales[["date"]]], axis=1)
-
-    # merge with main dataset
-    shop_item_date_level_features = shop_item_date_level_features.merge(
-        coefs_var, on=["shop_id", "item_id", "date"], how="left"
-    )
-
-    # shift values of coefficient of variation by one day
-    # forward fill null values, so most recent non-null value is used for days without a sale
-    # then, fill first date with sale with 0's
-    shop_item_date_level_features["coef_var_price"] = (
-        shop_item_date_level_features.groupby(["shop_id", "item_id"])
-        .coef_var_price.shift()
-        .ffill()
-        .fillna(0)
-    )
-
-    # Expanding Mean Absolute Deviation of Quantity Sold (across all shop-items before current date)
-
-    # expanding Mean Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
-    qty_mads = (
-        sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
-        .expanding()
-        .agg(_mad)
-        .reset_index(name="qty_mean_abs_dev")
-        .drop("level_2", axis=1)
-    )
-
-    # add date column
-    qty_mads = pd.concat([qty_mads, sales[["date"]]], axis=1)
-
-    # merge with main dataset
-    shop_item_date_level_features = shop_item_date_level_features.merge(
-        qty_mads, on=["shop_id", "item_id", "date"], how="left"
-    )
-
-    # shift values of absolute deviation by one day
-    # forward fill null values, so most recent non-null value is used for days without a sale
-    # then, fill first date with sale with 0's
-    shop_item_date_level_features["qty_mean_abs_dev"] = (
-        shop_item_date_level_features.groupby(["shop_id", "item_id"])
-        .qty_mean_abs_dev.shift()
-        .ffill()
-        .fillna(0)
-    )
-
-    # Expanding Median Absolute Deviation of Quantity Sold (across all shop-items before current date)
-
-    # expanding Median Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
-    qty_median_ads = (
-        sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
-        .expanding()
-        .agg(median_absolute_deviation)
-        .reset_index(name="qty_median_abs_dev")
-        .drop("level_2", axis=1)
-    )
-
-    # add date column
-    qty_median_ads = pd.concat([qty_median_ads, sales[["date"]]], axis=1)
-
-    # merge with main dataset
-    shop_item_date_level_features = shop_item_date_level_features.merge(
-        qty_median_ads, on=["shop_id", "item_id", "date"], how="left"
-    )
-
-    # shift values of absolute deviation by one day
-    # forward fill null values, so most recent non-null value is used for days without a sale
-    # then, fill first date with sale with 0's
-    shop_item_date_level_features["qty_median_abs_dev"] = (
-        shop_item_date_level_features.groupby(["shop_id", "item_id"])
-        .qty_median_abs_dev.shift()
-        .ffill()
-        .fillna(0)
-    )
-
-    # Demand for Category in Last Week (Quantity Sold)
-    # also, flag for whether any items in same category were sold at the shop before current day
-
-    # Add item_category_id column
-    shop_item_date_level_features = shop_item_date_level_features.merge(
-        items_df[["item_id", "item_category_id"]], on="item_id", how="left"
-    )
-
-    # create dataframe with daily totals of quantity sold for each category at each shop
-    shop_cat_date_total_qty = (
-        shop_item_date_level_features[
-            ["shop_id", "date", "item_category_id", "shop_item_qty_sold_day"]
-        ]
-        .groupby(["shop_id", "item_category_id"])
-        .apply(lambda x: x.resample("D", on="date").shop_item_qty_sold_day.sum())
-    ).reset_index(name="shop_cat_qty_sold_day")
-
-    # calculate rolling weekly sum of quantity sold for each category at each shop, excluding current date
-    shop_cat_date_total_qty[
-        "shop_cat_qty_sold_last_7d"
-    ] = shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
-        "shop_cat_qty_sold_day"
-    ].apply(
-        lambda x: x.rolling(7, 1).sum().shift().fillna(0)
-    )
-
-    shop_cat_date_total_qty["cat_sold_at_shop_before_day_flag"] = (
-        shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
-            "shop_cat_qty_sold_day"
-        ]
-        .apply(lambda x: x.expanding().sum().shift().fillna(0))
-        .astype(bool)
-        .astype(np.int8)
-    )
-
-    # merge rolling weekly category quantity totals and flag column onto shop-item-date dataset
-    shop_item_date_level_features = shop_item_date_level_features.merge(
-        shop_cat_date_total_qty[
-            [
-                "shop_id",
-                "item_category_id",
-                "date",
-                "shop_cat_qty_sold_last_7d",
-                "cat_sold_at_shop_before_day_flag",
-            ]
-        ],
-        on=["shop_id", "item_category_id", "date"],
-        how="left",
-    )
-
-    # shop_item_date_level_features = _downcast(shop_item_date_level_features)
-    shop_item_date_level_features = _add_col_prefix(
-        shop_item_date_level_features, "sid_"
-    )
+    # # Expanding Coefficient of Variation of item price (across all dates for shop-item before current date)
+    #
+    # # expanding coefficient of variation of price across dates with a sale for each shop-item
+    # coefs_var = (
+    #     sales.groupby(["shop_id", "item_id"])["item_price"]
+    #     .expanding()
+    #     .agg(variation)
+    #     .reset_index(name="coef_var_price")
+    #     .drop("level_2", axis=1)
+    # )
+    #
+    # # add date column
+    # coefs_var = pd.concat([coefs_var, sales[["date"]]], axis=1)
+    #
+    # # merge with main dataset
+    # shop_item_date_level_features = shop_item_date_level_features.merge(
+    #     coefs_var, on=["shop_id", "item_id", "date"], how="left"
+    # )
+    #
+    # # shift values of coefficient of variation by one day
+    # # forward fill null values, so most recent non-null value is used for days without a sale
+    # # then, fill first date with sale with 0's
+    # shop_item_date_level_features["coef_var_price"] = (
+    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
+    #     .coef_var_price.shift()
+    #     .ffill()
+    #     .fillna(0)
+    # )
+    #
+    # # Expanding Mean Absolute Deviation of Quantity Sold (across all shop-items before current date)
+    #
+    # # expanding Mean Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
+    # qty_mads = (
+    #     sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
+    #     .expanding()
+    #     .agg(_mad)
+    #     .reset_index(name="qty_mean_abs_dev")
+    #     .drop("level_2", axis=1)
+    # )
+    #
+    # # add date column
+    # qty_mads = pd.concat([qty_mads, sales[["date"]]], axis=1)
+    #
+    # # merge with main dataset
+    # shop_item_date_level_features = shop_item_date_level_features.merge(
+    #     qty_mads, on=["shop_id", "item_id", "date"], how="left"
+    # )
+    #
+    # # shift values of absolute deviation by one day
+    # # forward fill null values, so most recent non-null value is used for days without a sale
+    # # then, fill first date with sale with 0's
+    # shop_item_date_level_features["qty_mean_abs_dev"] = (
+    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
+    #     .qty_mean_abs_dev.shift()
+    #     .ffill()
+    #     .fillna(0)
+    # )
+    #
+    # # Expanding Median Absolute Deviation of Quantity Sold (across all shop-items before current date)
+    #
+    # # expanding Median Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
+    # qty_median_ads = (
+    #     sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
+    #     .expanding()
+    #     .agg(median_absolute_deviation)
+    #     .reset_index(name="qty_median_abs_dev")
+    #     .drop("level_2", axis=1)
+    # )
+    #
+    # # add date column
+    # qty_median_ads = pd.concat([qty_median_ads, sales[["date"]]], axis=1)
+    #
+    # # merge with main dataset
+    # shop_item_date_level_features = shop_item_date_level_features.merge(
+    #     qty_median_ads, on=["shop_id", "item_id", "date"], how="left"
+    # )
+    #
+    # # shift values of absolute deviation by one day
+    # # forward fill null values, so most recent non-null value is used for days without a sale
+    # # then, fill first date with sale with 0's
+    # shop_item_date_level_features["qty_median_abs_dev"] = (
+    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
+    #     .qty_median_abs_dev.shift()
+    #     .ffill()
+    #     .fillna(0)
+    # )
+    #
+    # # Demand for Category in Last Week (Quantity Sold)
+    # # also, flag for whether any items in same category were sold at the shop before current day
+    #
+    # # Add item_category_id column
+    # shop_item_date_level_features = shop_item_date_level_features.merge(
+    #     items_df[["item_id", "item_category_id"]], on="item_id", how="left"
+    # )
+    #
+    # # create dataframe with daily totals of quantity sold for each category at each shop
+    # shop_cat_date_total_qty = (
+    #     shop_item_date_level_features[
+    #         ["shop_id", "date", "item_category_id", "shop_item_qty_sold_day"]
+    #     ]
+    #     .groupby(["shop_id", "item_category_id"])
+    #     .apply(lambda x: x.resample("D", on="date").shop_item_qty_sold_day.sum())
+    # ).reset_index(name="shop_cat_qty_sold_day")
+    #
+    # # calculate rolling weekly sum of quantity sold for each category at each shop, excluding current date
+    # shop_cat_date_total_qty[
+    #     "shop_cat_qty_sold_last_7d"
+    # ] = shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
+    #     "shop_cat_qty_sold_day"
+    # ].apply(
+    #     lambda x: x.rolling(7, 1).sum().shift().fillna(0)
+    # )
+    #
+    # shop_cat_date_total_qty["cat_sold_at_shop_before_day_flag"] = (
+    #     shop_cat_date_total_qty.groupby(["shop_id", "item_category_id"])[
+    #         "shop_cat_qty_sold_day"
+    #     ]
+    #     .apply(lambda x: x.expanding().sum().shift().fillna(0))
+    #     .astype(bool)
+    #     .astype(np.int8)
+    # )
+    #
+    # # merge rolling weekly category quantity totals and flag column onto shop-item-date dataset
+    # shop_item_date_level_features = shop_item_date_level_features.merge(
+    #     shop_cat_date_total_qty[
+    #         [
+    #             "shop_id",
+    #             "item_category_id",
+    #             "date",
+    #             "shop_cat_qty_sold_last_7d",
+    #             "cat_sold_at_shop_before_day_flag",
+    #         ]
+    #     ],
+    #     on=["shop_id", "item_category_id", "date"],
+    #     how="left",
+    # )
+    #
+    # # shop_item_date_level_features = _downcast(shop_item_date_level_features)
+    # shop_item_date_level_features = _add_col_prefix(
+    #     shop_item_date_level_features, "sid_"
+    # )
 
     logging.info(
         f"Shop-item-date dataframe has {shop_item_date_level_features.shape[0]} "
@@ -2396,7 +2436,7 @@ def main():
         build_shop_item_date_lvl_features(test_df, items_df, to_sql=args.send_to_sql)
 
     # copy log file to S3 bucket
-    upload_file(f"./logs/{log_fname}", "my-ec2-logs", log_fname)
+    # upload_file(f"./logs/{log_fname}", "my-ec2-logs", log_fname)
 
 if __name__ == "__main__":
     main()
