@@ -1,5 +1,6 @@
 """
-Script to create EC2 instance
+Script to create EC2 instance and associate the necessary IAM role with the
+instance.
 
 Usage: run from the command line as such:
 
@@ -25,6 +26,10 @@ def start_instance(dry_run = False):
     ec2_client = boto3.client('ec2', region_name=ec2_instance["region"])
 
     try:
+        # not using user_data script as it is run as root user,
+        # which does not work for creating a virtual environment for ec2-user
+        # user_data = open('ec2_user_data.txt').read()
+
         instance = ec2.create_instances(
             ImageId = ec2_instance["image_id"],
             InstanceType = ec2_instance["instance_type"],
@@ -35,6 +40,8 @@ def start_instance(dry_run = False):
             KeyName = ec2_instance["key_pair"],
             MaxCount=1,
             MinCount=1,
+            IamInstanceProfile={'Name': ec2_instance["iam_profile"]},
+            # UserData=user_data,
             DryRun=dry_run
         )
         print("Starting EC2 {0} instance in {1} availability zone".format(ec2_instance["instance_type"], ec2_instance["azone"]))
@@ -72,6 +79,29 @@ def start_instance(dry_run = False):
                 print("Instance public IP: ", instance.public_ip_address)
                 print("Instance private IP: ", instance.private_ip_address)
                 print("Public dns name: ", instance.public_dns_name)
+
+                # iam_request = ec2_client.associate_iam_instance_profile(
+                #     IamInstanceProfile={
+                #         # 'Arn': 'string',
+                #         'Name': iam_profile
+                #     },
+                #     InstanceId=instance.id
+                # )
+                #
+                # time.sleep(5)
+                # assoc_id = iam_request['IamInstanceProfileAssociation']['AssociationId']
+                # associating_iam = True
+                #
+                # while associating_iam:
+                #     time.sleep(2)
+                #     iam_response = ec2_client.describe_iam_instance_profile_associations(
+                #         AssociationIds=[
+                #             assoc_id,
+                #         ],
+                #     )
+                #     if iam_response['IamInstanceProfileAssociations']['State'] == 'associated':
+                #         print(f"IAM profile {iam_profile} successfully associated with instance")
+                #         associating_iam = False
 
                 starting = False
 
