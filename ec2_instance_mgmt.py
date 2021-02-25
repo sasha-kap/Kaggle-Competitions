@@ -40,6 +40,9 @@ def start_instance(dry_run = False):
             KeyName = ec2_instance["key_pair"],
             MaxCount=1,
             MinCount=1,
+            Monitoring={
+                'Enabled': True
+            },
             IamInstanceProfile={'Name': ec2_instance["iam_profile"]},
             # UserData=user_data,
             DryRun=dry_run
