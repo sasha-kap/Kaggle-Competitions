@@ -29,7 +29,9 @@ import warnings
 import boto3
 import numpy as np
 import pandas as pd
+from psycopg2.sql import SQL, Identifier
 from scipy.stats import median_absolute_deviation, variation
+import sqlalchemy
 from tqdm import tqdm
 
 # Local imports
@@ -43,6 +45,7 @@ from dateconstants import (
     WORLDCUP2014,
     CITY_POP,
 )
+from rds_db_commands import df_from_sql_query
 from rds_instance_mgmt import start_instance, stop_instance
 from timer import Timer
 from write_df_to_sql_table import psql_insert_copy, write_df_to_sql
@@ -126,6 +129,46 @@ def _downcast(df_in):
         .pipe(_downcast_all, "integer")
         .pipe(_downcast_all, target_type="unsigned", initial_type="integer")
     )
+
+
+# based on https://stackoverflow.com/a/34384664/9987623
+def _map_to_sql_dtypes(df):
+    """Create dictionary mapping pandas/numpy data types in dataframe to
+    PostgreSQL data types.
+
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        Dataframe with columns that need their data types mapped
+
+    Returns:
+    --------
+    dtypedict
+        Dictionary with keys being column names and values being PostgreSQL
+        data types
+    """
+
+    dtypedict = {}
+    for i,j in zip(df.columns, df.dtypes):
+        if "object" in str(j):
+            dtypedict.update({i: sqlalchemy.types.NVARCHAR(length=255)})
+
+        elif "datetime" in str(j):
+            dtypedict.update({i: sqlalchemy.types.DateTime()})
+
+        elif "float" in str(j):
+            dtypedict.update({i: sqlalchemy.types.Float(precision=3, asdecimal=True)})
+
+        elif ("int8" in str(j)) | ("int16" in str(j)):
+            dtypedict.update({i: sqlalchemy.types.SMALLINT()})
+
+        elif "int32" in str(j):
+            dtypedict.update({i: sqlalchemy.types.INT()})
+
+        elif "int64" in str(j):
+            dtypedict.update({i: sqlalchemy.types.BIGINT()})
+
+    return dtypedict
 
 
 # PERFORM INITIAL DATA CLEANING
@@ -228,9 +271,11 @@ def clean_sales_data(sales, return_df=False, to_sql=False):
         )
 
     if to_sql:
+        sales = _downcast(sales)
         start_instance()
         sales.rename(columns={"date": "sale_date"}, inplace=True)
-        write_df_to_sql(sales, "sales_cleaned")
+        dtypes_dict = _map_to_sql_dtypes(sales)
+        write_df_to_sql(sales, "sales_cleaned", dtypes_dict)
 
     if return_df:
         return sales
@@ -406,7 +451,8 @@ def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
 
     if to_sql:
         start_instance()
-        write_df_to_sql(shops_df, "shops")
+        dtypes_dict = _map_to_sql_dtypes(shops_df)
+        write_df_to_sql(shops_df, "shops", dtypes_dict)
 
     if return_df:
         return shops_df
@@ -554,7 +600,8 @@ def build_item_lvl_features(items_df, categories_df, return_df=False, to_sql=Fal
 
     if to_sql:
         start_instance()
-        write_df_to_sql(item_level_features, "items")
+        dtypes_dict = _map_to_sql_dtypes(item_level_features)
+        write_df_to_sql(item_level_features, "items", dtypes_dict)
 
     if return_df:
         return item_level_features
@@ -903,7 +950,8 @@ def build_date_lvl_features(macro_df, ps4games, return_df=False, to_sql=False):
     if to_sql:
         start_instance()
         date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
-        write_df_to_sql(date_level_features, "dates")
+        dtypes_dict = _map_to_sql_dtypes(date_level_features)
+        write_df_to_sql(date_level_features, "dates", dtypes_dict)
 
     if return_df:
         return date_level_features
@@ -1296,7 +1344,7 @@ def _n_sale_dts(df, levels):
 
 
 @Timer(logger=logging.info)
-def num_of_sale_dts_in_prev_x_days(df, levels):
+def num_of_sale_dts_in_prev_x_days(df, levels, to_sql=False):
     """Create columns for number of days in previous 7-day and 30-day periods
     with a sale, as well as number of days with a sale since start of train period.
 
@@ -1306,6 +1354,8 @@ def num_of_sale_dts_in_prev_x_days(df, levels):
         Dataframe in which to create new column (dataframe will be modified inplace)
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
+    to_sql : bool
+        Write resulting dataframe to SQL table (True) or not (False)
 
     Returns:
     --------
@@ -1323,14 +1373,55 @@ def num_of_sale_dts_in_prev_x_days(df, levels):
         if i % 25 == 0:
             gc.collect()
         results.append(_n_sale_dts(grp, levels))
-    all_dfs = pd.concat(results, ignore_index=True)
+    n_sale_dts_df = pd.concat(results, ignore_index=True)
     del results
 
-    df = df.merge(
-        all_dfs, on=[level + "_id" for level in levels] + ["date"], how="left"
-    )
+    # For larger data (shop-item-date level), upload results directly to SQL table,
+    # instead of merging with other columns
+    if len(levels) == 2:
+        n_sale_dts_df = _add_col_prefix(n_sale_dts_df, "sid_")
 
-    df.drop("day_w_sale", axis=1, inplace=True)
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for number of sale "
+            f"dates in previous x days has {n_sale_dts_df.shape[0]} rows and "
+            f"{n_sale_dts_df.shape[1]} columns."
+        )
+        nl = "\n" + " " * 50
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for number of sale "
+            f"dates in previous x days has the following columns: "
+            f"{nl}{nl.join(n_sale_dts_df.columns.to_list())}"
+        )
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for number of sale "
+            f"dates in previous x days has the following data types: "
+            f"{nl}{n_sale_dts_df.dtypes.to_string().replace(nl[:1],nl)}"
+        )
+        miss_vls = n_sale_dts_df.isnull().sum()
+        miss_vls = miss_vls[miss_vls > 0].index.to_list()
+        if miss_vls:
+            logging.warning(
+                f"Shop-item-date-level dataframe with columns for number of sale "
+                f"dates in previous x days has the following columns with "
+                f"null values: {nl}{nl.join(miss_vls)}"
+            )
+
+        if to_sql:
+            start_instance()
+            n_sale_dts_df.rename(columns={"date": "sale_date"}, inplace=True)
+            dtypes_dict = _map_to_sql_dtypes(n_sale_dts_df)
+            write_df_to_sql(n_sale_dts_df, "sid_n_sale_dts", dtypes_dict)
+            stop_instance()
+            del n_sale_dts_df
+
+    else:
+        df = df.merge(
+            n_sale_dts_df, on=[level + "_id" for level in levels] + ["date"], how="left"
+        )
+        del n_sale_dts_df
+
+        df.drop("day_w_sale", axis=1, inplace=True)
+
     return _downcast(df)
 
 
@@ -1370,13 +1461,13 @@ def _rolling_stats(df, levels):
         .shift()
         .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
-    # df[f"{'_'.join(levels)}_rolling_7d_mode_qty"] = (
-    #     df[f"{'_'.join(levels)}_qty_sold_day"]
-    #     .rolling(7, 1)
-    #     .apply(lambda x: _mode(x))
-    #     .shift()
-    #     .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
-    # )
+    df[f"{'_'.join(levels)}_rolling_7d_mode_qty"] = (
+        df[f"{'_'.join(levels)}_qty_sold_day"]
+        .rolling(7, 1)
+        .apply(lambda x: _mode(x))
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
+    )
     df[f"{'_'.join(levels)}_rolling_7d_median_qty"] = (
         df[f"{'_'.join(levels)}_qty_sold_day"]
         .rolling(7, 1)
@@ -1389,7 +1480,7 @@ def _rolling_stats(df, levels):
 
 
 @Timer(logger=logging.info)
-def rolling_7d_qty_stats(df, levels):
+def rolling_7d_qty_stats(df, levels, to_sql=False):
     """Create rolling max, min, mean, mode and median quantity sold values,
     grouped by values of specified column(s).
 
@@ -1399,6 +1490,8 @@ def rolling_7d_qty_stats(df, levels):
         Dataframe in which to create new columns (dataframe will be modified inplace)
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
+    to_sql : bool
+        Write resulting dataframe to SQL table (True) or not (False)
 
     Returns:
     --------
@@ -1416,13 +1509,52 @@ def rolling_7d_qty_stats(df, levels):
         if i % 25 == 0:
             gc.collect()
         results.append(_rolling_stats(grp, levels))
-    all_dfs = pd.concat(results, ignore_index=True)
+    roll_7d_qty_df = pd.concat(results, ignore_index=True)
     del results
 
-    df = df.merge(
-        all_dfs, on=[level + "_id" for level in levels] + ["date"], how="left"
-    )
-    del all_dfs
+    # For larger data (shop-item-date level), upload results directly to SQL table,
+    # instead of merging with other columns
+    if len(levels) == 2:
+        roll_7d_qty_df = _add_col_prefix(roll_7d_qty_df, "sid_")
+
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for rolling 7-day "
+            f"quantity stats has {roll_7d_qty_df.shape[0]} rows and "
+            f"{roll_7d_qty_df.shape[1]} columns."
+        )
+        nl = "\n" + " " * 50
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for rolling 7-day "
+            f"quantity stats has the following columns: "
+            f"{nl}{nl.join(roll_7d_qty_df.columns.to_list())}"
+        )
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for rolling 7-day "
+            f"quantity stats has the following data types: "
+            f"{nl}{roll_7d_qty_df.dtypes.to_string().replace(nl[:1],nl)}"
+        )
+        miss_vls = roll_7d_qty_df.isnull().sum()
+        miss_vls = miss_vls[miss_vls > 0].index.to_list()
+        if miss_vls:
+            logging.warning(
+                f"Shop-item-date-level dataframe with columns for rolling 7-day "
+                f"quantity stats has the following columns with "
+                f"null values: {nl}{nl.join(miss_vls)}"
+            )
+
+        if to_sql:
+            start_instance()
+            roll_7d_qty_df.rename(columns={"date": "sale_date"}, inplace=True)
+            dtypes_dict = _map_to_sql_dtypes(roll_7d_qty_df)
+            write_df_to_sql(roll_7d_qty_df, "sid_roll_qty_stats", dtypes_dict)
+            stop_instance()
+            del roll_7d_qty_df
+
+    else:
+        df = df.merge(
+            roll_7d_qty_df, on=[level + "_id" for level in levels] + ["date"], how="left"
+        )
+        del roll_7d_qty_df
 
     return _downcast(df)
 
@@ -1462,7 +1594,7 @@ def _expand_cv2(df, levels):
 
 
 @Timer(logger=logging.info)
-def expanding_cv2_of_qty(df, levels):
+def expanding_cv2_of_qty(df, levels, to_sql=False):
     """Create column for expanding coefficient of variation squared of quantity
     bought before current day, with only positive quantity values considered.
 
@@ -1472,6 +1604,8 @@ def expanding_cv2_of_qty(df, levels):
         Dataframe in which to create new column (dataframe will be modified inplace)
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
+    to_sql : bool
+        Write resulting dataframe to SQL table (True) or not (False)
 
     Returns:
     --------
@@ -1489,13 +1623,52 @@ def expanding_cv2_of_qty(df, levels):
         if i % 25 == 0:
             gc.collect()
         results.append(_expand_cv2(grp, levels))
-    all_dfs = pd.concat(results, ignore_index=True)
+    expand_qty_cv2_df = pd.concat(results, ignore_index=True)
     del results
 
-    df = df.merge(
-        all_dfs, on=[level + "_id" for level in levels] + ["date"], how="left"
-    )
-    del all_dfs
+    # For larger data (shop-item-date level), upload results directly to SQL table,
+    # instead of merging with other columns
+    if len(levels) == 2:
+        expand_qty_cv2_df = _add_col_prefix(expand_qty_cv2_df, "sid_")
+
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding cv2 "
+            f"of quantity has {expand_qty_cv2_df.shape[0]} rows and "
+            f"{expand_qty_cv2_df.shape[1]} columns."
+        )
+        nl = "\n" + " " * 50
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding cv2 "
+            f"of quantity has the following columns: "
+            f"{nl}{nl.join(expand_qty_cv2_df.columns.to_list())}"
+        )
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding cv2 "
+            f"of quantity has the following data types: "
+            f"{nl}{expand_qty_cv2_df.dtypes.to_string().replace(nl[:1],nl)}"
+        )
+        miss_vls = expand_qty_cv2_df.isnull().sum()
+        miss_vls = miss_vls[miss_vls > 0].index.to_list()
+        if miss_vls:
+            logging.warning(
+                f"Shop-item-date-level dataframe with columns for expanding cv2 "
+                f"of quantity has the following columns with "
+                f"null values: {nl}{nl.join(miss_vls)}"
+            )
+
+        if to_sql:
+            start_instance()
+            expand_qty_cv2_df.rename(columns={"date": "sale_date"}, inplace=True)
+            dtypes_dict = _map_to_sql_dtypes(expand_qty_cv2_df)
+            write_df_to_sql(expand_qty_cv2_df, "sid_expand_qty_cv_sqrd", dtypes_dict)
+            stop_instance()
+            del expand_qty_cv2_df
+
+    else:
+        df = df.merge(
+            expand_qty_cv2_df, on=[level + "_id" for level in levels] + ["date"], how="left"
+        )
+        del expand_qty_cv2_df
 
     return _downcast(df)
 
@@ -1560,13 +1733,13 @@ def _expanding_stats(df, levels):
         .shift()
         .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
     )
-    # df[f"{'_'.join(levels)}_expand_qty_mode"] = (
-    #     df[f"{'_'.join(levels)}_qty_sold_day"]
-    #     .expanding()
-    #     .apply(lambda x: _mode(x))
-    #     .shift()
-    #     .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
-    # )
+    df[f"{'_'.join(levels)}_expand_qty_mode"] = (
+        df[f"{'_'.join(levels)}_qty_sold_day"]
+        .expanding()
+        .apply(lambda x: _mode(x))
+        .shift()
+        .fillna(df[f"{'_'.join(levels)}_qty_sold_day"])
+    )
     df[f"{'_'.join(levels)}_expand_qty_median"] = (
         df[f"{'_'.join(levels)}_qty_sold_day"]
         .expanding()
@@ -1579,7 +1752,7 @@ def _expanding_stats(df, levels):
 
 
 @Timer(logger=logging.info)
-def expanding_qty_sold_stats(df, levels):
+def expanding_qty_sold_stats(df, levels, to_sql=False):
     """Create expanding max, min, mean, mode and median quantity sold values,
     grouped by values of specified column(s).
 
@@ -1589,6 +1762,8 @@ def expanding_qty_sold_stats(df, levels):
         Dataframe in which to create new columns (dataframe will be modified inplace)
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
+    to_sql : bool
+        Write resulting dataframe to SQL table (True) or not (False)
 
     Returns:
     --------
@@ -1606,13 +1781,52 @@ def expanding_qty_sold_stats(df, levels):
         if i % 25 == 0:
             gc.collect()
         results.append(_expanding_stats(grp, levels))
-    all_dfs = pd.concat(results, ignore_index=True)
+    expand_qty_stats_df = pd.concat(results, ignore_index=True)
     del results
 
-    df = df.merge(
-        all_dfs, on=[level + "_id" for level in levels] + ["date"], how="left"
-    )
-    del all_dfs
+    # For larger data (shop-item-date level), upload results directly to SQL table,
+    # instead of merging with other columns
+    if len(levels) == 2:
+        expand_qty_stats_df = _add_col_prefix(expand_qty_stats_df, "sid_")
+
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding "
+            f"quantity stats has {expand_qty_stats_df.shape[0]} rows and "
+            f"{expand_qty_stats_df.shape[1]} columns."
+        )
+        nl = "\n" + " " * 50
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding "
+            f"quantity stats has the following columns: "
+            f"{nl}{nl.join(expand_qty_stats_df.columns.to_list())}"
+        )
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding "
+            f"quantity stats has the following data types: "
+            f"{nl}{expand_qty_stats_df.dtypes.to_string().replace(nl[:1],nl)}"
+        )
+        miss_vls = expand_qty_stats_df.isnull().sum()
+        miss_vls = miss_vls[miss_vls > 0].index.to_list()
+        if miss_vls:
+            logging.warning(
+                f"Shop-item-date-level dataframe with columns for expanding "
+                f"quantity stats has the following columns with "
+                f"null values: {nl}{nl.join(miss_vls)}"
+            )
+
+        if to_sql:
+            start_instance()
+            expand_qty_stats_df.rename(columns={"date": "sale_date"}, inplace=True)
+            dtypes_dict = _map_to_sql_dtypes(expand_qty_stats_df)
+            write_df_to_sql(expand_qty_stats_df, "sid_expand_qty_stats", dtypes_dict)
+            stop_instance()
+            del expand_qty_stats_df
+
+    else:
+        df = df.merge(
+            expand_qty_stats_df, on=[level + "_id" for level in levels] + ["date"], how="left"
+        )
+        del expand_qty_stats_df
 
     return _downcast(df)
 
@@ -1685,13 +1899,13 @@ def _expanding_bw_sales_stats(df, levels):
         .shift()
         .fillna(0)
     )
-    # df[f"{'_'.join(levels)}_date_mode_gap_bw_sales"] = (
-    #     df[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"]
-    #     .expanding()
-    #     .apply(lambda x: _mode(x))
-    #     .shift()
-    #     .fillna(0)
-    # )
+    df[f"{'_'.join(levels)}_date_mode_gap_bw_sales"] = (
+        df[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"]
+        .expanding()
+        .apply(lambda x: _mode(x))
+        .shift()
+        .fillna(0)
+    )
     df[f"{'_'.join(levels)}_date_std_gap_bw_sales"] = (
         df[f"{'_'.join(levels)}_days_since_prev_sale_lmtd"]
         .expanding()
@@ -1704,7 +1918,7 @@ def _expanding_bw_sales_stats(df, levels):
 
 
 @Timer(logger=logging.info)
-def expanding_time_bw_sales_stats(df, levels):
+def expanding_time_bw_sales_stats(df, levels, to_sql=False):
     """Create expanding max, min, mean, mode, median and standard deviation of
     days between sales columns, grouped by values of specified column(s).
 
@@ -1714,6 +1928,8 @@ def expanding_time_bw_sales_stats(df, levels):
         Dataframe in which to create new columns (dataframe will be modified inplace)
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
+    to_sql : bool
+        Write resulting dataframe to SQL table (True) or not (False)
 
     Returns:
     --------
@@ -1737,15 +1953,54 @@ def expanding_time_bw_sales_stats(df, levels):
         if i % 25 == 0:
             gc.collect()
         results.append(_expanding_bw_sales_stats(grp, levels))
-    all_dfs = pd.concat(results, ignore_index=True)
+    expand_bw_sales_stats_df = pd.concat(results, ignore_index=True)
     del results
 
-    df = df.merge(
-        all_dfs, on=[level + "_id" for level in levels] + ["date"], how="left"
-    )
-    del all_dfs
+    # For larger data (shop-item-date level), upload results directly to SQL table,
+    # instead of merging with other columns
+    if len(levels) == 2:
+        expand_bw_sales_stats_df = _add_col_prefix(expand_bw_sales_stats_df, "sid_")
 
-    df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding days "
+            f"between sales stats has {expand_bw_sales_stats_df.shape[0]} rows and "
+            f"{expand_bw_sales_stats_df.shape[1]} columns."
+        )
+        nl = "\n" + " " * 50
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding days "
+            f"between sales stats has the following columns: "
+            f"{nl}{nl.join(expand_bw_sales_stats_df.columns.to_list())}"
+        )
+        logging.info(
+            f"Shop-item-date-level dataframe with columns for expanding days "
+            f"between sales stats has the following data types: "
+            f"{nl}{expand_bw_sales_stats_df.dtypes.to_string().replace(nl[:1],nl)}"
+        )
+        miss_vls = expand_bw_sales_stats_df.isnull().sum()
+        miss_vls = miss_vls[miss_vls > 0].index.to_list()
+        if miss_vls:
+            logging.warning(
+                f"Shop-item-date-level dataframe with columns for expanding days "
+                f"between sales stats has the following columns with "
+                f"null values: {nl}{nl.join(miss_vls)}"
+            )
+
+        if to_sql:
+            start_instance()
+            expand_bw_sales_stats_df.rename(columns={"date": "sale_date"}, inplace=True)
+            dtypes_dict = _map_to_sql_dtypes(expand_bw_sales_stats_df)
+            write_df_to_sql(expand_bw_sales_stats_df, "sid_expand_bw_sales_stats", dtypes_dict)
+            stop_instance()
+            del expand_bw_sales_stats_df
+
+    else:
+        df = df.merge(
+            expand_bw_sales_stats_df, on=[level + "_id" for level in levels] + ["date"], how="left"
+        )
+        del expand_bw_sales_stats_df
+        df.drop(f"{'_'.join(levels)}_days_since_prev_sale_lmtd", axis=1, inplace=True)
+
     return _downcast(df)
 
 
@@ -1815,21 +2070,47 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
     ].fillna(0, inplace=True)
 
     first_day = datetime.datetime(*FIRST_DAY_OF_TEST_PRD)
-    df = pd.concat(
-        [
-            df,
-            non_zero_qty_level_dates.query("date == @first_day")[
-                [level + "_id" for level in levels] + ["date"]
+
+    # For larger data (shop-item-date level), upload intermediate results to SQL tables,
+    # and concatenate and merge in-database
+    if len(levels) == 2:
+        # export dataframes to SQL tables before concatenating to save memory
+        start_instance()
+        df = _downcast(df)
+        dtypes_dict = _map_to_sql_dtypes(df)
+        write_df_to_sql(df, "df_temp", dtypes_dict)
+        dtypes_dict = _map_to_sql_dtypes(non_zero_qty_level_dates)
+        write_df_to_sql(non_zero_qty_level_dates, "non_zero_temp", dtypes_dict)
+
+        del df
+        del non_zero_qty_level_dates
+
+        # per https://www.psycopg.org/docs/sql.html#psycopg2.sql.SQL
+        sql = SQL("SELECT * FROM (SELECT * FROM df_temp UNION ALL (SELECT {0} FROM non_zero_temp WHERE date = %(dt)s)) LEFT JOIN (SELECT * FROM non_zero _temp) ON {0};").format(
+            SQL(', ').join([Identifier(col) for col in [level + "_id" for level in levels] + ["date"]])
+        )
+        # [Identifier('shop_id'), Identifier('item_id'), Identifier('date')]
+
+        params = {'dt': first_day}
+        df = df_from_sql_query(sql, params, ['date'])
+
+    else:
+        df = pd.concat(
+            [
+                df,
+                non_zero_qty_level_dates.query("date == @first_day")[
+                    [level + "_id" for level in levels] + ["date"]
+                ],
             ],
-        ],
-        axis=0,
-        ignore_index=True,
-    )
-    df = df.merge(
-        non_zero_qty_level_dates,
-        on=[level + "_id" for level in levels] + ["date"],
-        how="left",
-    )
+            axis=0,
+            ignore_index=True,
+        )
+        df = df.merge(
+            non_zero_qty_level_dates,
+            on=[level + "_id" for level in levels] + ["date"],
+            how="left",
+        )
+
     del non_zero_qty_level_dates
     df[f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"] = df.groupby(
         [level + "_id" for level in levels]
@@ -2185,7 +2466,8 @@ def build_item_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     if to_sql:
         start_instance()
         item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
-        write_df_to_sql(item_date_level_features, "item_dates")
+        dtypes_dict = _map_to_sql_dtypes(item_date_level_features)
+        write_df_to_sql(item_date_level_features, "item_dates", dtypes_dict)
         stop_instance()
 
     if return_df:
@@ -2341,7 +2623,8 @@ def build_shop_date_lvl_features(test_df, items_df, return_df=False, to_sql=Fals
     if to_sql:
         start_instance()
         shop_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
-        write_df_to_sql(shop_date_level_features, "shop_dates")
+        dtypes_dict = _map_to_sql_dtypes(shop_date_level_features)
+        write_df_to_sql(shop_date_level_features, "shop_dates", dtypes_dict)
         stop_instance()
 
     if return_df:
@@ -2474,13 +2757,13 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         .pipe(days_elapsed_since_prev_sale, ["shop", "item"])
         .pipe(days_elapsed_since_first_sale, ["shop", "item"])
         .pipe(first_week_month_of_sale, ["shop", "item"])
-        .pipe(num_of_sale_dts_in_prev_x_days, ["shop", "item"])
-        .pipe(rolling_7d_qty_stats, ["shop", "item"])
-        .pipe(expanding_cv2_of_qty, ["shop", "item"])
+        .pipe(num_of_sale_dts_in_prev_x_days, ["shop", "item"], to_sql=to_sql)
+        .pipe(rolling_7d_qty_stats, ["shop", "item"], to_sql=to_sql)
+        .pipe(expanding_cv2_of_qty, ["shop", "item"], to_sql=to_sql)
         .pipe(expanding_avg_demand_int, ["shop", "item"])
-        .pipe(expanding_qty_sold_stats, ["shop", "item"])
+        .pipe(expanding_qty_sold_stats, ["shop", "item"], to_sql=to_sql)
         .pipe(qty_sold_x_days_before, ["shop", "item"])
-        .pipe(expanding_time_bw_sales_stats, ["shop", "item"])
+        .pipe(expanding_time_bw_sales_stats, ["shop", "item"], to_sql=to_sql)
         .pipe(diff_bw_last_and_sec_to_last_qty, ["shop", "item"])
         .pipe(days_since_max_qty_sold, ["shop", "item"])
     )
@@ -2668,7 +2951,8 @@ def build_shop_item_date_lvl_features(test_df, items_df, return_df=False, to_sql
         shop_item_date_level_features.rename(
             columns={"date": "sale_date"}, inplace=True
         )
-        write_df_to_sql(shop_item_date_level_features, "shop_item_dates")
+        dtypes_dict = _map_to_sql_dtypes(shop_item_date_level_features)
+        write_df_to_sql(shop_item_date_level_features, "shop_item_dates", dtypes_dict)
         stop_instance()
 
     if return_df:
