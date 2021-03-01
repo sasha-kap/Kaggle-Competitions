@@ -62,7 +62,7 @@ def chunker(seq, size):
 
 
 @Timer(logger=logging.info)
-def write_df_to_sql(df, table_name):
+def write_df_to_sql(df, table_name, dtypes_dict):
     '''Write pandas DataFrame object to PostgreSQL table, while displaying
     progress bar. Rows will be written in chunks of up to 10,000 rows max.
 
@@ -72,6 +72,8 @@ def write_df_to_sql(df, table_name):
         Dataframe to be written to SQL table
     table_name : str
         Name of SQL table to write to
+    dtypes_dict : dict
+        Dictionary mapping df pandas data types to PostgreSQL data types
 
     Returns:
     --------
@@ -111,6 +113,7 @@ def write_df_to_sql(df, table_name):
                 engine,
                 if_exists=replace,
                 index=False,
-                method=psql_insert_copy
+                method=psql_insert_copy,
+                dtype = dtypes_dict
             )
             pbar.update(chunksize)
