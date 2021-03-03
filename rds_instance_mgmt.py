@@ -37,7 +37,7 @@ def create_instance():
             AllocatedStorage=int(rds_instance["storage_gb"]),
             DBName=db_details["database"],
             Engine="postgres",
-            EngineVersion=db_details["version"],
+            EngineVersion=rds_instance["version"],
             AvailabilityZone=rds_instance["azone"],
             StorageType=rds_instance["storage_type"],
             StorageEncrypted=True,
