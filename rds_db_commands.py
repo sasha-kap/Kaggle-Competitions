@@ -1,6 +1,8 @@
 """
-Query existing AWS RDS PostgreSQL database to obtain information on tables and
-columns.
+Functions:
+1) Query existing AWS RDS PostgreSQL database to obtain information on tables and
+columns
+2) Write results from SQL query to pandas DataFrame
 
 Copyright (c) 2021 Sasha Kapralov
 Licensed under the MIT License (see LICENSE for details)
@@ -16,7 +18,9 @@ import datetime
 import logging
 from pathlib import Path
 
+import pandas as pd
 import psycopg2
+from psycopg2.sql import SQL, Identifier
 
 # Import the 'config' function from the config.py file
 from config import config
@@ -28,6 +32,15 @@ from timer import Timer
 def query_table_info(csv_dir):
     """ Connect to the PostgreSQL database server and query info on existing
     tables.
+
+    Parameters:
+    -----------
+    csv_dir : str or pathlib.Path() object
+        Directory in which to save CSV files with query results
+
+    Returns:
+    --------
+    None
     """
     conn = None
     try:
@@ -35,19 +48,18 @@ def query_table_info(csv_dir):
         db_params = config(section="postgresql")
 
         # connect to the PostgreSQL server
-        print('Connecting to the PostgreSQL database...')
+        logging.info("Connecting to the PostgreSQL database...")
         conn = psycopg2.connect(**db_params)
 
         # create a cursor to perform database operations
         cur = conn.cursor()
 
-	    # execute a statement
-        print('PostgreSQL database version:')
-        cur.execute('SELECT version()')
+        # execute a statement
+        cur.execute("SELECT version()")
 
         # display the PostgreSQL database server version
         db_version = cur.fetchone()
-        print(db_version)
+        logging.info(f"PostgreSQL database version: {db_version}")
 
         # Show tables in PostgreSQL by querying data from the PostgreSQL catalog,
         # filtering out system tables
@@ -60,9 +72,11 @@ def query_table_info(csv_dir):
         """
 
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
-        csv_fname = f"pg_tables_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
+        csv_fname = (
+            f"pg_tables_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
+        )
         csv_path = csv_dir.joinpath(csv_fname)
-        with open(csv_path, 'w') as f:
+        with open(csv_path, "w") as f:
             cur.copy_expert(outputquery, f)
 
         # Get information on columns in all tables from the information_schema.columns catalog
@@ -80,9 +94,11 @@ def query_table_info(csv_dir):
         """
 
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
-        csv_fname = f"columns_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
+        csv_fname = (
+            f"columns_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
+        )
         csv_path = csv_dir.joinpath(csv_fname)
-        with open(csv_path, 'w') as f:
+        with open(csv_path, "w") as f:
             cur.copy_expert(outputquery, f)
 
         # Get information on colummn constraints (unique, primary key, foreign key)
@@ -101,7 +117,7 @@ def query_table_info(csv_dir):
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
         csv_fname = f"key_column_usage_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
         csv_path = csv_dir.joinpath(csv_fname)
-        with open(csv_path, 'w') as f:
+        with open(csv_path, "w") as f:
             cur.copy_expert(outputquery, f)
 
         # Per https://stackoverflow.com/a/21738505/9987623
@@ -112,22 +128,106 @@ def query_table_info(csv_dir):
             ORDER BY 2
         """
 
+        # Per https://stackoverflow.com/a/52706756/9987623
+        # query = """
+        #     SELECT current_database() AS database,
+        #            pg_size_pretty(total_database_size) AS total_database_size,
+        #            schema_name,
+        #            table_name,
+        #            pg_size_pretty(total_table_size) AS total_table_size,
+        #            pg_size_pretty(table_size) AS table_size,
+        #            pg_size_pretty(index_size) AS index_size
+        #            FROM ( SELECT table_name,
+        #                     table_schema AS schema_name,
+        #                     pg_database_size(current_database()) AS total_database_size,
+        #                     pg_total_relation_size(table_name) AS total_table_size,
+        #                     pg_relation_size(table_name) AS table_size,
+        #                     pg_indexes_size(table_name) AS index_size
+        #                     FROM information_schema.tables
+        #                     WHERE table_schema = 'public'
+        #                     ORDER BY total_table_size
+        #                 ) AS sizes
+        # """
+
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
         csv_fname = f"table_size_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
         csv_path = csv_dir.joinpath(csv_fname)
-        with open(csv_path, 'w') as f:
+        with open(csv_path, "w") as f:
             cur.copy_expert(outputquery, f)
 
-	    # close the communication with the PostgreSQL
+        # Make the changes to the database persistent
+        conn.commit()
+        # close the communication with the PostgreSQL
         cur.close()
 
     except (Exception, psycopg2.DatabaseError) as error:
-        print(error)
+        logging.exception("Exception occurred")
 
     finally:
         if conn is not None:
             conn.close()
-            print('Database connection closed.')
+            logging.info("Database connection closed.")
+
+
+@Timer(logger=logging.info)
+def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None):
+    """Connect to the PostgreSQL database, execute SQL query and return
+    results as pandas DataFrame.
+
+    Parameters:
+    -----------
+    sql_query : str SQL query or SQLAlchemy Selectable (select or text object)
+        SQL query to be executed
+    params : list, tuple or dict, optional, default: None
+        List of parameters to pass to execute method
+    date_list : list or dict, optional, default: None
+        List of column names to parse as dates
+    delete_tables : list, optional, default: None
+        List of tables to delete from PostgreSQL after executing the SQL query
+
+    Returns:
+    --------
+    pandas DataFrame
+
+    """
+    conn = None
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+        # connect to the PostgreSQL server
+        conn = psycopg2.connect(**db_params)
+        return pd.concat(
+            [
+                chunk
+                for chunk in pd.read_sql_query(
+                    sql_query, conn, params=params, parse_dates=date_list, chunksize=10000
+                )
+            ],
+            ignore_index=True,
+        )
+        if delete_tables is not None:
+            # open a cursor to perform database operations
+            # as context manager (see https://www.psycopg.org/docs/usage.html)
+            with conn.cursor() as cur:
+                sql = SQL("DROP TABLE IF EXISTS {0};").format(
+                    SQL(", ").join([Identifier(table) for table in delete_tables])
+                )
+                cur.execute(sql)
+                conn.commit()
+
+            logging.info(
+                f"The following tables were successfully deleted "
+                f"from DB: {', '.join(delete_tables)}"
+            )
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
 
 def main():
 
@@ -147,11 +247,10 @@ def main():
         filename=log_path,
     )
 
-    logger = logging.getLogger()
-
     start_instance()
     query_table_info(log_dir)
     stop_instance()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
