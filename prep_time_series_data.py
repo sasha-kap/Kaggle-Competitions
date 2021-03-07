@@ -14,6 +14,9 @@ Usage: run from the command line as such:
 
     # Create DF of shop/item/date (or combination)-level features and write to SQL table
     python3 prep_time_series_data.py shops --to_sql
+
+    # Do a test run on last month of available data
+    python3 prep_time_series_data.py dates --to_sql --test_run
 """
 
 # Standard library imports
@@ -74,8 +77,7 @@ def upload_file(file_name, bucket, object_name):
     try:
         response = s3.meta.client.upload_file(file_name, bucket, object_name)
     except ClientError as e:
-        return False
-    return True
+        print(e)
 
 
 # Downcast Numeric Columns to Reduce Memory Usage
@@ -151,22 +153,24 @@ def _map_to_sql_dtypes(df):
     dtypedict = {}
     for i, j in zip(df.columns, df.dtypes):
         if "object" in str(j):
-            dtypedict.update({i: sqlalchemy.types.NVARCHAR(length=255)})
+            dtypedict.update({i: sqlalchemy.types.VARCHAR(length=255)})
 
         elif "datetime" in str(j):
             dtypedict.update({i: sqlalchemy.types.DateTime()})
 
+        # PostgreSQL accepts float(1) to float(24) as selecting the real type
+        # per https://www.postgresql.org/docs/12/datatype-numeric.html
         elif "float" in str(j):
             dtypedict.update({i: sqlalchemy.types.Float(precision=3, asdecimal=True)})
 
-        elif ("int8" in str(j)) | ("int16" in str(j)):
-            dtypedict.update({i: sqlalchemy.types.SMALLINT()})
+        elif ("int64" in str(j)) | ("uint32" in str(j)):
+            dtypedict.update({i: sqlalchemy.types.BIGINT()})
 
-        elif "int32" in str(j):
+        elif ("int32" in str(j)) | ("uint16" in str(j)):
             dtypedict.update({i: sqlalchemy.types.INT()})
 
-        elif "int64" in str(j):
-            dtypedict.update({i: sqlalchemy.types.BIGINT()})
+        elif ("int8" in str(j)) | ("int16" in str(j)):
+            dtypedict.update({i: sqlalchemy.types.SMALLINT()})
 
     return dtypedict
 
@@ -1715,11 +1719,46 @@ def expanding_avg_demand_int(df, levels):
     df : pandas DataFrame
         Updated dataframe
     """
-    df[f"{'_'.join(levels)}_expanding_adi"] = (
-        df[f"{'_'.join(levels)}_days_since_first_sale"]
-        .div(df[f"{'_'.join(levels)}_cnt_sale_dts_before_day"])
-        .fillna(0)
-    )
+    if len(levels) == 2:
+        start_instance()
+        sql_str = (
+            "SELECT "
+            "{0} "
+            "FROM sid_n_sale_dts "
+            "ORDER BY {1};"
+        )
+        sql = SQL(sql_str).format(
+            SQL(", ").join(
+                [
+                    Identifier(col)
+                    for col in [level + "_id" for level in levels] + ["sale_date"]
+                    + [f"sid_{'_'.join(levels)}_cnt_sale_dts_before_day"]
+                ]
+            ),
+            SQL(", ").join(
+                [
+                    Identifier(col)
+                    for col in [level + "_id" for level in levels] + ["sale_date"]
+                ]
+            )
+        )
+        sale_dts_df = df_from_sql_query(
+            sql,
+            date_list=["sale_date"]
+        )
+        df[f"{'_'.join(levels)}_expanding_adi"] = (
+            df[f"{'_'.join(levels)}_days_since_first_sale"]
+            .div(sale_dts_df[f"sid_{'_'.join(levels)}_cnt_sale_dts_before_day"])
+            .fillna(0)
+        )
+
+    else:
+        df[f"{'_'.join(levels)}_expanding_adi"] = (
+            df[f"{'_'.join(levels)}_days_since_first_sale"]
+            .div(df[f"{'_'.join(levels)}_cnt_sale_dts_before_day"])
+            .fillna(0)
+        )
+
     return _downcast(df)
 
 
@@ -2116,32 +2155,66 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         dtypes_dict = _map_to_sql_dtypes(non_zero_qty_level_dates)
         write_df_to_sql(non_zero_qty_level_dates, "non_zero_temp", dtypes_dict)
 
+        # per https://www.psycopg.org/docs/sql.html#psycopg2.sql.SQL
+        # UNION: number and order of columns must be the same and data types
+        # must be compatible
+        df_cols = df.columns.sort_values().to_list()
+        non_zero_cols = non_zero_qty_level_dates.columns.to_list()
         del df
         del non_zero_qty_level_dates
-
-        # per https://www.psycopg.org/docs/sql.html#psycopg2.sql.SQL
         sql_str = (
-            "SELECT * "
+            "SELECT b.*, {10} "
             "FROM (SELECT * "
-            "FROM df_temp "
-            "UNION ALL (SELECT {0} "
+            "FROM (SELECT {0}, {1} from df_temp) AS a "
+            "UNION ALL (SELECT {0}, {2} "
             "FROM non_zero_temp "
-            "WHERE sale_date = %(dt)s)) "
+            "WHERE sale_date = %(dt)s)) AS b "
             "LEFT JOIN (SELECT * "
-            "FROM non_zero_temp) "
-            "ON {0};"
+            "FROM non_zero_temp) AS c "
+            "ON {3} = {4} AND {5} = {6} AND {7} = {8} "
+            "ORDER BY {9};"
         )
         sql = SQL(sql_str).format(
+            # 0: columns that exist in both tables
             SQL(", ").join(
                 [
                     Identifier(col)
+                    for col in [colname for colname in df_cols if colname in non_zero_cols]
+                ]
+            ),
+            # 1: columns that only exist in main df
+            SQL(", ").join(
+                [
+                    Identifier(col)
+                    for col in [colname for colname in df_cols if colname not in non_zero_cols]
+                ]
+            ),
+            # 2: columns that only exist in main df, with "null as" added
+            SQL("%(none)s AS ") + SQL(", %(none)s AS ").join(
+                [
+                    Identifier(col)
+                    for col in [colname for colname in df_cols if colname not in non_zero_cols]
+                ]
+            ),
+            # 3-8: columns to merge on, with table identifiers
+            Identifier("b", "shop_id"),
+            Identifier("c", "shop_id"),
+            Identifier("b", "item_id"),
+            Identifier("c", "item_id"),
+            Identifier("b", "sale_date"),
+            Identifier("c", "sale_date"),
+            # 9: shop_id, item_id, sale_date - columns to sort final table by
+            # [Identifier('b', 'shop_id'), Identifier('b', 'item_id'), Identifier('b', 'sale_date')]
+            SQL(", ").join(
+                [
+                    Identifier("b", col)
                     for col in [level + "_id" for level in levels] + ["sale_date"]
                 ]
-            )
+            ),
+            Identifier("c", f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty")
         )
-        # [Identifier('shop_id'), Identifier('item_id'), Identifier('sale_date')]
 
-        params = {"dt": first_day}
+        params = {"dt": first_day, "none": None}
         df = df_from_sql_query(
             sql,
             params=params,
@@ -2178,7 +2251,7 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         dtypes_dict = _map_to_sql_dtypes(df)
         write_df_to_sql(df, "df_temp", dtypes_dict)
         del df
-        sql = "SELECT * FROM df_temp WHERE sale_date <> %(dt)s"
+        sql = SQL("SELECT * FROM df_temp WHERE sale_date <> %(dt)s ORDER BY shop_id, item_id, sale_date;")
         params = {"dt": first_day}
         df = df_from_sql_query(
             sql, params=params, date_list=["sale_date"], delete_tables=["df_temp"]
@@ -2299,9 +2372,13 @@ def _expanding_max(idx, df, levels):
     --------
     pandas multi-index Series
     """
-    df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names(
-        [level + "_id" for level in levels]
-    )
+    if isinstance(idx, int):
+        df.index = pd.Index([idx] * len(df)).set_names([level + "_id" for level in levels])
+    elif isinstance(idx, tuple):
+        df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names([level + "_id" for level in levels])
+    # df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names(
+    #     [level + "_id" for level in levels]
+    # )
     return (
         df.set_index("date", append=True)[f"{'_'.join(levels)}_qty_sold_day"]
         .expanding()
@@ -2846,7 +2923,8 @@ def build_shop_item_date_lvl_features(
     Returns:
     --------
     shop_item_date_level_features : pandas dataframe
-        Dataframe with each row representing a unique combination of shop_id, item_id, and date and columns containing shop-item-date-level features
+        Dataframe with each row representing a unique combination of shop_id,
+        item_id, and date and columns containing shop-item-date-level features
     """
     # check if cleaned sales file already exists
     if test_run:
@@ -2961,8 +3039,8 @@ def build_shop_item_date_lvl_features(
     del qty_median_ads
 
     # PERFORM JOIN OF ALL TABLES INSIDE RDS AND SAVE TO NEW DF
-    sql = (
-        "SELECT a.*, b.*, c.*, d.*, e.item_category_id "
+    sql = SQL(
+        "SELECT a.*, b.coef_var_price, c.qty_mean_abs_dev, d.qty_median_abs_dev, e.i_item_category_id "
         "FROM df_temp a "
         "LEFT JOIN coefs_var b "
         "ON a.shop_id = b.shop_id AND a.item_id = b.item_id AND a.sale_date = b.sale_date "
@@ -2971,7 +3049,8 @@ def build_shop_item_date_lvl_features(
         "LEFT JOIN qty_median_ads d "
         "ON a.shop_id = d.shop_id AND a.item_id = d.item_id AND a.sale_date = d.sale_date "
         "LEFT JOIN items e "
-        "ON a.item_id = e.item_id;"
+        "ON a.item_id = e.item_id "
+        "ORDER BY shop_id, item_id, sale_date;"
     )
 
     shop_item_date_level_features = df_from_sql_query(
@@ -2979,7 +3058,13 @@ def build_shop_item_date_lvl_features(
         date_list=["sale_date"],
         delete_tables=["df_temp", "coefs_var", "qty_mads", "qty_median_ads"],
     )
-    shop_item_date_level_features.rename(columns={"sale_date": "date"}, inplace=True)
+    shop_item_date_level_features.rename(
+        columns={
+            "sale_date": "date",
+            "i_item_category_id": "item_category_id"
+        },
+        inplace=True
+    )
 
     results = []
     for i, (g, grp) in enumerate(
@@ -2990,134 +3075,6 @@ def build_shop_item_date_lvl_features(
         results.append(_shift_ffill_fillna(grp))
     shop_item_date_level_features = _downcast(pd.concat(results))
     del results
-
-    # # shift values of coefficient of variation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["coef_var_price"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .coef_var_price.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-    #
-    # # shift values of absolute deviation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["qty_mean_abs_dev"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .qty_mean_abs_dev.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-    #
-    # # shift values of absolute deviation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["qty_median_abs_dev"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .qty_median_abs_dev.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-
-    # # Expanding Coefficient of Variation of item price (across all dates for shop-item before current date)
-    #
-    # # expanding coefficient of variation of price across dates with a sale for each shop-item
-    # coefs_var = _downcast(
-    #     sales.groupby(["shop_id", "item_id"])["item_price"]
-    #     .expanding()
-    #     .agg(variation)
-    #     .reset_index(name="coef_var_price")
-    #     .drop("level_2", axis=1)
-    # )
-    #
-    # # add date column
-    # coefs_var = pd.concat([coefs_var, sales[["date"]]], axis=1)
-    #
-    # # merge with main dataset
-    # shop_item_date_level_features = shop_item_date_level_features.merge(
-    #     coefs_var, on=["shop_id", "item_id", "date"], how="left"
-    # )
-    # del coefs_var
-    #
-    # # shift values of coefficient of variation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["coef_var_price"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .coef_var_price.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-    #
-    # # Expanding Mean Absolute Deviation of Quantity Sold (across all shop-items before current date)
-    #
-    # # expanding Mean Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
-    # qty_mads = _downcast(
-    #     sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
-    #     .expanding()
-    #     .agg(_mad)
-    #     .reset_index(name="qty_mean_abs_dev")
-    #     .drop("level_2", axis=1)
-    # )
-    #
-    # # add date column
-    # qty_mads = pd.concat([qty_mads, sales[["date"]]], axis=1)
-    #
-    # # merge with main dataset
-    # shop_item_date_level_features = shop_item_date_level_features.merge(
-    #     qty_mads, on=["shop_id", "item_id", "date"], how="left"
-    # )
-    # del qty_mads
-    #
-    # # shift values of absolute deviation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["qty_mean_abs_dev"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .qty_mean_abs_dev.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-    #
-    # # Expanding Median Absolute Deviation of Quantity Sold (across all shop-items before current date)
-    #
-    # # expanding Median Absolute Deviation of Quantity Sold across dates with a sale for each shop-item
-    # qty_median_ads = _downcast(
-    #     sales.groupby(["shop_id", "item_id"])["item_cnt_day"]
-    #     .expanding()
-    #     .agg(median_absolute_deviation)
-    #     .reset_index(name="qty_median_abs_dev")
-    #     .drop("level_2", axis=1)
-    # )
-    #
-    # # add date column
-    # qty_median_ads = pd.concat([qty_median_ads, sales[["date"]]], axis=1)
-    #
-    # # merge with main dataset
-    # shop_item_date_level_features = shop_item_date_level_features.merge(
-    #     qty_median_ads, on=["shop_id", "item_id", "date"], how="left"
-    # )
-    # del qty_median_ads
-    #
-    # # shift values of absolute deviation by one day
-    # # forward fill null values, so most recent non-null value is used for days without a sale
-    # # then, fill first date with sale with 0's
-    # shop_item_date_level_features["qty_median_abs_dev"] = (
-    #     shop_item_date_level_features.groupby(["shop_id", "item_id"])
-    #     .qty_median_abs_dev.shift()
-    #     .ffill()
-    #     .fillna(0)
-    # )
-    #
-    # # Demand for Category in Last Week (Quantity Sold)
-    # # also, flag for whether any items in same category were sold at the shop before current day
-    #
-    # # Add item_category_id column
-    # shop_item_date_level_features = shop_item_date_level_features.merge(
-    #     items_df[["item_id", "item_category_id"]], on="item_id", how="left"
-    # )
 
     # create dataframe with daily totals of quantity sold for each category at each shop
     grp_levels = ["shop_id", "item_category_id"]
@@ -3158,22 +3115,6 @@ def build_shop_item_date_lvl_features(
         results.append(_expand_sale_flag(grp))
     shop_cat_date_total_qty = _downcast(pd.concat(results))
     del results
-
-    # # merge rolling weekly category quantity totals and flag column onto shop-item-date dataset
-    # shop_item_date_level_features = shop_item_date_level_features.merge(
-    #     shop_cat_date_total_qty[
-    #         [
-    #             "shop_id",
-    #             "item_category_id",
-    #             "date",
-    #             "shop_cat_qty_sold_last_7d",
-    #             "cat_sold_at_shop_before_day_flag",
-    #         ]
-    #     ],
-    #     on=["shop_id", "item_category_id", "date"],
-    #     how="left",
-    # )
-    # del shop_cat_date_total_qty
 
     # export shop-category-date DF to separate SQL table and delete object
     if to_sql:
@@ -3295,6 +3236,12 @@ def main():
         datefmt=datefmt,
         filename=log_path,
     )
+
+    # statements to suppress irrelevant logging by boto3-related libraries
+    logging.getLogger('boto3').setLevel(logging.CRITICAL)
+    logging.getLogger('botocore').setLevel(logging.CRITICAL)
+    logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
+    logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
     logging.info(f"The Python version is {platform.python_version()}.")
     logging.info(f"The pandas version is {pd.__version__}.")
