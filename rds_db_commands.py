@@ -176,7 +176,7 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
 
     Parameters:
     -----------
-    sql_query : str SQL query or SQLAlchemy Selectable (select or text object)
+    sql_query : SQLAlchemy Selectable (select or text object)
         SQL query to be executed
     params : list, tuple or dict, optional, default: None
         List of parameters to pass to execute method
@@ -196,7 +196,8 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
         db_params = config(section="postgresql")
         # connect to the PostgreSQL server
         conn = psycopg2.connect(**db_params)
-        return pd.concat(
+        logging.debug(f"SQL query to be executed by read_sql_query(): {sql_query.as_string(conn)}")
+        df = pd.concat(
             [
                 chunk
                 for chunk in pd.read_sql_query(
@@ -219,6 +220,7 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
                 f"The following tables were successfully deleted "
                 f"from DB: {', '.join(delete_tables)}"
             )
+        return df
 
     except (Exception, psycopg2.DatabaseError) as error:
         logging.exception("Exception occurred")
