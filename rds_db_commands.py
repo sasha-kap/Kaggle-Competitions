@@ -249,6 +249,12 @@ def main():
         filename=log_path,
     )
 
+    # statements to suppress irrelevant logging by boto3-related libraries
+    logging.getLogger('boto3').setLevel(logging.CRITICAL)
+    logging.getLogger('botocore').setLevel(logging.CRITICAL)
+    logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
+    logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+
     start_instance()
     query_table_info(log_dir)
     stop_instance()
