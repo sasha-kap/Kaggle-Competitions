@@ -3,6 +3,7 @@ import logging
 from io import StringIO
 
 from sqlalchemy import create_engine
+from sqlalchemy.sql import text
 import psycopg2
 from tqdm import tqdm
 
@@ -117,3 +118,16 @@ def write_df_to_sql(df, table_name, dtypes_dict):
                 dtype = dtypes_dict
             )
             pbar.update(chunksize)
+
+    # Text query per https://docs.sqlalchemy.org/en/14/core/tutorial.html#using-textual-sql
+    sql = text(
+        "SELECT table_name, pg_relation_size(quote_ident(table_name)) "
+            "FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = :name"
+    )
+    params = {"name": table_name}
+    # Log size of newly created table
+    try:
+        logging.info(f"Created {table_name} table's size is: {engine.execute(sql, params).fetchall()[1]}")
+    except:
+        logging.debug(f"Table size query on {table_name} table was not executed.")
