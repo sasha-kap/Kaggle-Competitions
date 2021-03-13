@@ -2,6 +2,7 @@
 Functions:
 1) Query existing AWS RDS PostgreSQL database to obtain information on tables and
 columns
+2) Run specified SQL query and save results to CSV file
 2) Write results from SQL query to pandas DataFrame
 
 Copyright (c) 2021 Sasha Kapralov
@@ -11,9 +12,11 @@ Licensed under the MIT License (see LICENSE for details)
 
 Usage: run from the command line as such:
 
-    python3 rds_db_commands.py
+    python3 rds_db_commands.py summary
+    python rds_db_commands.py query --stop
 
 """
+import argparse
 import datetime
 import logging
 from pathlib import Path
@@ -170,6 +173,66 @@ def query_table_info(csv_dir):
 
 
 @Timer(logger=logging.info)
+def run_query(csv_dir):
+    """ Connect to the PostgreSQL database server and run specified query.
+
+    Parameters:
+    -----------
+    csv_dir : str or pathlib.Path() object
+        Directory in which to save CSV files with query results
+
+    Returns:
+    --------
+    None
+    """
+
+    conn = None
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+
+        # connect to the PostgreSQL server
+        logging.info("Connecting to the PostgreSQL database...")
+        conn = psycopg2.connect(**db_params)
+
+        # create a cursor to perform database operations
+        cur = conn.cursor()
+
+        # prepare a query
+        query = (
+            "SELECT id_cat_qty_sold_last_7d, "
+            "COUNT(id_cat_qty_sold_last_7d) + "
+            "COUNT(CASE WHEN id_cat_qty_sold_last_7d "
+            "IS NULL THEN 1 ELSE NULL END) as CountOf "
+            "FROM item_dates "
+            "GROUP BY id_cat_qty_sold_last_7d "
+            "ORDER BY id_cat_qty_sold_last_7d"
+        )
+        logging.debug(f"SQL query to be executed: {query}")
+
+        outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
+        csv_fname = (
+            f"query_output_{datetime.datetime.now().strftime('%Y_%m_%d_%H_%M')}.csv"
+        )
+        csv_path = csv_dir.joinpath(csv_fname)
+        with open(csv_path, "w") as f:
+            cur.copy_expert(outputquery, f)
+
+        # Make the changes to the database persistent
+        conn.commit()
+        # close the communication with the PostgreSQL
+        cur.close()
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
+
+@Timer(logger=logging.info)
 def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None):
     """Connect to the PostgreSQL database, execute SQL query and return
     results as pandas DataFrame.
@@ -232,6 +295,29 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "command",
+        metavar="<command>",
+        help="'summary' or 'query'",
+    )
+    parser.add_argument(
+        "--stop",
+        default=False,
+        action="store_true",
+        help="stop RDS instance after querying (if included) or not (if not included)",
+    )
+
+    args = parser.parse_args()
+
+    if args.command not in [
+        "summary",
+        "query",
+    ]:
+        print(
+            "'{}' is not recognized. "
+            "Use 'summary' or 'query'".format(args.command)
+        )
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -256,9 +342,14 @@ def main():
     logging.getLogger('urllib3').setLevel(logging.CRITICAL)
 
     start_instance()
-    query_table_info(log_dir)
-    stop_instance()
 
+    if args.command == "summary":
+        query_table_info(log_dir)
+    elif args.command == "query":
+        run_query(log_dir)
+
+    if args.stop == True:
+        stop_instance()
 
 if __name__ == "__main__":
     main()
