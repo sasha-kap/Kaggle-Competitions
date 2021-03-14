@@ -233,7 +233,7 @@ def run_query(csv_dir):
 
 
 @Timer(logger=logging.info)
-def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None):
+def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_tables=None):
     """Connect to the PostgreSQL database, execute SQL query and return
     results as pandas DataFrame.
 
@@ -241,6 +241,8 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
     -----------
     sql_query : SQLAlchemy Selectable (select or text object)
         SQL query to be executed
+    pd_types : dict
+        Dictionary of dataframe data types to be used to cast output of SQL query
     params : list, tuple or dict, optional, default: None
         List of parameters to pass to execute method
     date_list : list or dict, optional, default: None
@@ -262,7 +264,7 @@ def df_from_sql_query(sql_query, params=None, date_list=None, delete_tables=None
         logging.debug(f"SQL query to be executed by read_sql_query(): {sql_query.as_string(conn)}")
         df = pd.concat(
             [
-                chunk
+                chunk.astype({k: v for k, v in pd_types.items() if k in chunk.columns})
                 for chunk in pd.read_sql_query(
                     sql_query, conn, params=params, parse_dates=date_list, chunksize=10000
                 )
