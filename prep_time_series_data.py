@@ -56,6 +56,37 @@ from write_df_to_sql_table import psql_insert_copy, write_df_to_sql
 
 warnings.filterwarnings("ignore")
 
+# Load data
+data_path = "./Data/competitive-data-science-predict-future-sales/"
+
+# Original sales data at roughly shop-item-date level for the train period
+sales_df = pd.read_csv(data_path + "sales_train.csv")
+# Original shop-item level data for the test period
+test_df = pd.read_csv(data_path + "test.csv")
+# Original dataset with item_id to item_category_id mapping
+items_df = pd.read_csv(data_path + "items.csv")
+# Original dataset with item_category_id to item_category_name mapping
+categories_df = pd.read_csv(data_path + "item_categories.csv")
+# Original dataset with shop_id to shop_name and city mapping
+shops = pd.read_csv(data_path + "shops.csv")
+# Original dataset with columns containing daily macroeconomic indicators
+macro_df = pd.read_csv(data_path + "macro.csv", parse_dates=["date"])
+# Original dataset with PS4 game release dates
+usecols = [
+    "Title",
+    "Genre",
+    "Developer",
+    "Publisher",
+    "Release date JP",
+    "Release date EU",
+    "Release date NA",
+    "Addons",
+]
+ps4games = pd.read_csv(data_path + "ps4_games.csv", usecols=usecols)
+ps4games[["Release date JP", "Release date EU", "Release date NA"]] = ps4games[
+    ["Release date JP", "Release date EU", "Release date NA"]
+].apply(pd.to_datetime, errors="coerce")
+
 
 def upload_file(file_name, bucket, object_name):
     """Upload a file to an S3 bucket
@@ -179,13 +210,11 @@ def _map_to_sql_dtypes(df):
 
 # PERFORM INITIAL DATA CLEANING
 @Timer(logger=logging.info)
-def clean_sales_data(sales, return_df=False, to_sql=False, test_run=False):
+def clean_sales_data(return_df=False, to_sql=False, test_run=False):
     """Perform initial data cleaning of the train shop-item-date data.
 
     Parameters:
     -----------
-    sales : pandas Dataframe
-        Original dataframe at roughly shop-item-date level for the train period
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -198,6 +227,8 @@ def clean_sales_data(sales, return_df=False, to_sql=False, test_run=False):
     sales : pandas dataframe
         Cleaned-up version of shop-item-date train dataset
     """
+
+    sales = sales_df.copy()
 
     # convert the date column from string to datetime type
     sales.date = sales.date.apply(lambda x: datetime.datetime.strptime(x, "%d.%m.%Y"))
@@ -365,13 +396,11 @@ def _lat_lon_to_float(in_coord, degree_sign="\N{DEGREE SIGN}"):
 
 
 @Timer(logger=logging.info)
-def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
+def build_shop_lvl_features(return_df=False, to_sql=False):
     """Build dataframe of shop-level features.
 
     Parameters:
     -----------
-    shops_df : pandas DataFrame
-        Existing dataframe with shop_id to shop_name and city mapping
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -384,7 +413,7 @@ def build_shop_lvl_features(shops_df, return_df=False, to_sql=False):
     """
 
     # remove shop_ids 9 and 20 (as they were found to have strange sales trends)
-    shops_df = shops_df[~(shops_df.shop_id.isin([9, 20]))]
+    shops_df = shops[~(shops.shop_id.isin([9, 20]))]
 
     # Shop City
 
@@ -505,17 +534,11 @@ def _group_game_consoles(cat_name):
 
 
 @Timer(logger=logging.info)
-def build_item_lvl_features(
-    items_df, categories_df, return_df=False, to_sql=False, test_run=False
-):
+def build_item_lvl_features(return_df=False, to_sql=False, test_run=False):
     """Build dataframe of item-level features.
 
     Parameters:
     -----------
-    items_df : pandas DataFrame
-        Existing dataframe with item_id to item_category_id mapping
-    categories_df : pandas DataFrame
-        Existing dataframe with item_category_id to item_category_name mapping
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -538,7 +561,7 @@ def build_item_lvl_features(
         sales = pd.read_csv(input_csv)
         sales["date"] = pd.to_datetime(sales.date)
     else:
-        sales = clean_sales_data(sales, return_df=True, test_run=test_run)
+        sales = clean_sales_data(return_df=True, test_run=test_run)
 
     # Column of all unique item_ids
     item_level_features = (
@@ -700,17 +723,11 @@ def _month_counter(d1):
 
 
 @Timer(logger=logging.info)
-def build_date_lvl_features(
-    macro_df, ps4games, return_df=False, to_sql=False, test_run=False
-):
+def build_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     """Build dataframe of date-level features.
 
     Parameters:
     -----------
-    macro_df : pandas DataFrame
-        Existing dataframe with columns containing daily macroeconomic indicators
-    ps4games : pandas DataFrame
-        Existing dataframe with PS4 game release dates
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -733,7 +750,7 @@ def build_date_lvl_features(
         sales = pd.read_csv(input_csv)
         sales["date"] = pd.to_datetime(sales.date)
     else:
-        sales = clean_sales_data(sales, return_df=True, test_run=test_run)
+        sales = clean_sales_data(return_df=True, test_run=test_run)
 
     # Dates from Start to End of Training Period
     date_level_features = pd.DataFrame(
@@ -868,9 +885,6 @@ def build_date_lvl_features(
 
     # Macroeconomic Indicator Columns
 
-    # convert the date column in macro_df from string to datetime type
-    macro_df["date"] = pd.to_datetime(macro_df.timestamp)
-
     # subset macro_df dataset to relevant period
     macro_df_2013_2015 = macro_df[
         (macro_df.date >= datetime.datetime(*FIRST_DAY_OF_TRAIN_PRD))
@@ -902,10 +916,6 @@ def build_date_lvl_features(
     # Date of a PS4 Game Release and Number of Games Released on Date
 
     # create column for date of a PS4 game release and column for number of games released on date
-    ps4games[["Release date JP", "Release date EU", "Release date NA"]] = ps4games[
-        ["Release date JP", "Release date EU", "Release date NA"]
-    ].apply(pd.to_datetime, errors="coerce")
-
     ps4games_before_Nov2015 = ps4games[
         ps4games["Release date EU"] <= datetime.datetime(*LAST_DAY_OF_TRAIN_PRD)
     ][["Title", "Genre", "Release date EU", "Addons"]]
@@ -1146,7 +1156,7 @@ def _drop_first_row(df):
 
 
 @Timer(logger=logging.info)
-def add_zero_qty_after_last_date_rows(df, test_df, levels):
+def add_zero_qty_after_last_date_rows(df, levels):
     """Add new (missing) rows between last observed sale date and last day of
     the training period for each value of levels and only for levels that exist
     in the test data, with 0 values for quantity sold.
@@ -1155,8 +1165,6 @@ def add_zero_qty_after_last_date_rows(df, test_df, levels):
     -----------
     df : pandas DataFrame
         Dataframe in which to create new rows
-    test_df : pandas DataFrame
-        Existing shop-item level dataframe for the test period
     levels : list of strings
         List of levels by which to group values (e.g., ['shop', 'item'])
 
@@ -1457,7 +1465,7 @@ def num_of_sale_dts_in_prev_x_days(df, levels, to_sql=False):
                 with open(input_json, "r") as fp:
                     master_pd_types = json.load(fp)
             else:
-                build_item_lvl_features(items_df, categories_df)
+                build_item_lvl_features()
                 with open(input_json, "r") as fp:
                     master_pd_types = json.load(fp)
             master_pd_types.update(
@@ -1770,6 +1778,9 @@ def expanding_avg_demand_int(df, levels):
             ),
         )
         # pass master dictionary of data types to df_from_sql_query function
+        input_json = "master_pd_types.json"
+        with open(input_json, "r") as fp:
+            master_pd_types = json.load(fp)
         sale_dts_df = df_from_sql_query(
             sql, master_pd_types["n_sale_dts_df"], date_list=["sale_date"]
         )
@@ -2186,7 +2197,7 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
             with open(input_json, "r") as fp:
                 master_pd_types = json.load(fp)
         else:
-            build_item_lvl_features(items_df, categories_df)
+            build_item_lvl_features()
             with open(input_json, "r") as fp:
                 master_pd_types = json.load(fp)
         master_pd_types.update({"df": df.dtypes.map(str).to_dict()})
@@ -2501,17 +2512,11 @@ def days_since_max_qty_sold(df, levels):
 
 
 @Timer(logger=logging.info)
-def build_item_date_lvl_features(
-    test_df, items_df, return_df=False, to_sql=False, test_run=False
-):
+def build_item_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     """Build dataframe of item-date-level features.
 
     Parameters:
     -----------
-    test_df : pandas DataFrame
-        Existing dataframe with shop_id-item_id combinations for test period
-    items_df : pandas DataFrame
-        Existing dataframe with item_id to item_category_id mapping
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -2534,7 +2539,7 @@ def build_item_date_lvl_features(
         sales = pd.read_csv(input_csv)
         sales["date"] = pd.to_datetime(sales.date)
     else:
-        sales = clean_sales_data(sales, return_df=True, test_run=test_run)
+        sales = clean_sales_data(return_df=True, test_run=test_run)
 
     # Quantity Sold
 
@@ -2549,7 +2554,7 @@ def build_item_date_lvl_features(
     # pass dataframe through multiple functions to add needed rows and columns
     item_date_level_features = (
         item_date_level_features.pipe(add_zero_qty_rows, ["item"])
-        .pipe(add_zero_qty_after_last_date_rows, test_df, ["item"])
+        .pipe(add_zero_qty_after_last_date_rows, ["item"])
         .pipe(prev_nonzero_qty_sold, ["item"])
         .pipe(days_elapsed_since_prev_sale, ["item"])
         .pipe(days_elapsed_since_first_sale, ["item"])
@@ -2700,17 +2705,11 @@ def build_item_date_lvl_features(
 
 # SHOP-DATE-LEVEL FEATURES
 @Timer(logger=logging.info)
-def build_shop_date_lvl_features(
-    test_df, items_df, return_df=False, to_sql=False, test_run=False
-):
+def build_shop_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     """Build dataframe of shop-date-level features.
 
     Parameters:
     -----------
-    test_df : pandas DataFrame
-        Existing dataframe with shop_id-item_id combinations for test period
-    items_df : pandas DataFrame
-        Existing dataframe with item_id to item_category_id mapping
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -2733,7 +2732,7 @@ def build_shop_date_lvl_features(
         sales = pd.read_csv(input_csv)
         sales["date"] = pd.to_datetime(sales.date)
     else:
-        sales = clean_sales_data(sales, return_df=True, test_run=test_run)
+        sales = clean_sales_data(return_df=True, test_run=test_run)
 
     # Quantity Sold by Shop-Date
 
@@ -2748,7 +2747,7 @@ def build_shop_date_lvl_features(
     # pass dataframe through multiple functions to add needed rows and columns
     shop_date_level_features = (
         shop_date_level_features.pipe(add_zero_qty_rows, ["shop"])
-        .pipe(add_zero_qty_after_last_date_rows, test_df, ["shop"])
+        .pipe(add_zero_qty_after_last_date_rows, ["shop"])
         .pipe(prev_nonzero_qty_sold, ["shop"])
         .pipe(days_elapsed_since_prev_sale, ["shop"])
         .pipe(days_elapsed_since_first_sale, ["shop"])
@@ -2970,17 +2969,11 @@ def _shift_ffill_fillna(df):
 
 # SHOP-ITEM-DATE-LEVEL FEATURES
 @Timer(logger=logging.info)
-def build_shop_item_date_lvl_features(
-    test_df, items_df, return_df=False, to_sql=False, test_run=False
-):
+def build_shop_item_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     """Build dataframe of shop-item-date-level features.
 
     Parameters:
     -----------
-    test_df : pandas DataFrame
-        Existing dataframe with shop_id-item_id combinations for test period
-    items_df : pandas DataFrame
-        Existing dataframe with item_id to item_category_id mapping
     return_df : bool
         Return resulting dataframe (True) or not (False)
     to_sql : bool
@@ -3004,7 +2997,7 @@ def build_shop_item_date_lvl_features(
         sales = pd.read_csv(input_csv)
         sales["date"] = pd.to_datetime(sales.date)
     else:
-        sales = clean_sales_data(sales, return_df=True, test_run=test_run)
+        sales = clean_sales_data(return_df=True, test_run=test_run)
 
     # Total Quantity Sold by Shop-Item-Date
 
@@ -3019,7 +3012,7 @@ def build_shop_item_date_lvl_features(
     # pass dataframe through multiple functions to add needed rows and columns
     shop_item_date_level_features = (
         shop_item_date_level_features.pipe(add_zero_qty_rows, ["shop", "item"])
-        .pipe(add_zero_qty_after_last_date_rows, test_df, ["shop", "item"])
+        .pipe(add_zero_qty_after_last_date_rows, ["shop", "item"])
         .pipe(prev_nonzero_qty_sold, ["shop", "item"])
         .pipe(days_elapsed_since_prev_sale, ["shop", "item"])
         .pipe(days_elapsed_since_first_sale, ["shop", "item"])
@@ -3046,7 +3039,7 @@ def build_shop_item_date_lvl_features(
         with open(input_json, "r") as fp:
             master_pd_types = json.load(fp)
     else:
-        build_item_lvl_features(items_df, categories_df)
+        build_item_lvl_features()
         with open(input_json, "r") as fp:
             master_pd_types = json.load(fp)
     master_pd_types.update(
@@ -3165,6 +3158,7 @@ def build_shop_item_date_lvl_features(
         if i % 25 == 0:
             gc.collect()
         results.append(_shift_ffill_fillna(grp))
+    del shop_item_date_level_features
     shop_item_date_level_features = _downcast(pd.concat(results))
     del results
 
@@ -3340,28 +3334,6 @@ def main():
     logging.info(f"The numpy version is {np.__version__}.")
     logging.info(f"The SQLAlchemy version is {sqlalchemy.__version__}")
 
-    # Load data
-    data_path = "./Data/competitive-data-science-predict-future-sales/"
-
-    sales = pd.read_csv(data_path + "sales_train.csv")
-    test_df = pd.read_csv(data_path + "test.csv")
-    items_df = pd.read_csv(data_path + "items.csv")
-    categories_df = pd.read_csv(data_path + "item_categories.csv")
-    shops_df = pd.read_csv(data_path + "shops.csv")
-    macro_df = pd.read_csv(data_path + "macro.csv")
-
-    usecols = [
-        "Title",
-        "Genre",
-        "Developer",
-        "Publisher",
-        "Release date JP",
-        "Release date EU",
-        "Release date NA",
-        "Addons",
-    ]
-    ps4games = pd.read_csv(data_path + "ps4_games.csv", usecols=usecols)
-
     # Call clean_sales_data() if need to run that code in standalone fashion.
     # If calling other functions that rely on clean sales data, check if clean
     # data file exists and use it if it does or call clean_sales_data() if
@@ -3373,28 +3345,20 @@ def main():
         FIRST_DAY_OF_TRAIN_PRD = (2015, 10, 1)
 
     if args.command == "clean":
-        clean_sales_data(sales, to_sql=args.send_to_sql, test_run=args.test_run)
+        clean_sales_data(to_sql=args.send_to_sql, test_run=args.test_run)
     elif args.command == "shops":
-        build_shop_lvl_features(shops_df, to_sql=args.send_to_sql)
+        build_shop_lvl_features(to_sql=args.send_to_sql)
     elif args.command == "items":
-        build_item_lvl_features(
-            items_df, categories_df, to_sql=args.send_to_sql, test_run=args.test_run
-        )
+        build_item_lvl_features(to_sql=args.send_to_sql, test_run=args.test_run)
     elif args.command == "dates":
-        build_date_lvl_features(
-            macro_df, ps4games, to_sql=args.send_to_sql, test_run=args.test_run
-        )
+        build_date_lvl_features(to_sql=args.send_to_sql, test_run=args.test_run)
     elif args.command == "item-dates":
-        build_item_date_lvl_features(
-            test_df, items_df, to_sql=args.send_to_sql, test_run=args.test_run
-        )
+        build_item_date_lvl_features(to_sql=args.send_to_sql, test_run=args.test_run)
     elif args.command == "shop-dates":
-        build_shop_date_lvl_features(
-            test_df, items_df, to_sql=args.send_to_sql, test_run=args.test_run
-        )
+        build_shop_date_lvl_features(to_sql=args.send_to_sql, test_run=args.test_run)
     elif args.command == "shop-item-dates":
         build_shop_item_date_lvl_features(
-            test_df, items_df, to_sql=args.send_to_sql, test_run=args.test_run
+            to_sql=args.send_to_sql, test_run=args.test_run
         )
 
     # copy log file to S3 bucket
