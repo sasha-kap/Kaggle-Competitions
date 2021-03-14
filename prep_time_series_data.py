@@ -23,6 +23,7 @@ Usage: run from the command line as such:
 import argparse
 import datetime
 import gc
+import json
 import logging
 from pathlib import Path
 import platform
@@ -93,6 +94,7 @@ def _float_to_int(ser):
         else:
             return ser
     except ValueError:
+        logging.exception("Exception occurred in _float_to_int() function.")
         return ser
 
 
@@ -617,6 +619,13 @@ def build_item_lvl_features(
             f"null values: {nl}{nl.join(miss_vls)}"
         )
 
+    # Initialize master dictionary of data types of columns from DFs that are going
+    # to be uploaded to SQL tables and queried later
+    master_pd_types = dict()
+    master_pd_types.update({"items": item_level_features.dtypes.map(str).to_dict()})
+    with open("master_pd_types.json", "w") as fp:
+        json.dump(master_pd_types, fp)
+
     if to_sql:
         start_instance()
         dtypes_dict = _map_to_sql_dtypes(item_level_features)
@@ -1008,7 +1017,7 @@ def _lag_merge_asof(df, col_to_count, lag):
     Parameters:
     -----------
     df : pandas DataFrame
-        Dataframe at col_to_count - date level
+        Dataframe at col_to_count - date level, sorted by date
     col_to_count : str
         Name of column with values that need to be counted
     lag : int
@@ -1405,6 +1414,7 @@ def num_of_sale_dts_in_prev_x_days(df, levels, to_sql=False):
     # For larger data (shop-item-date level), upload results directly to SQL table,
     # instead of merging with other columns
     if len(levels) == 2:
+        n_sale_dts_df = _downcast(n_sale_dts_df)
         n_sale_dts_df = _add_col_prefix(n_sale_dts_df, "sid_")
 
         logging.info(
@@ -1436,6 +1446,25 @@ def num_of_sale_dts_in_prev_x_days(df, levels, to_sql=False):
             start_instance()
             n_sale_dts_df.rename(columns={"date": "sale_date"}, inplace=True)
             dtypes_dict = _map_to_sql_dtypes(n_sale_dts_df)
+            # add dictionary of data types in n_sale_dts_df to master dictionary
+            # of data types in dataframes to be written to SQL and to be queried
+            # later
+            # first, check if master dictionary file already exists
+            # if not, run initialization code
+            input_json = "master_pd_types.json"
+            types_json = Path(input_json)
+            if types_json.is_file():
+                with open(input_json, "r") as fp:
+                    master_pd_types = json.load(fp)
+            else:
+                build_item_lvl_features(items_df, categories_df)
+                with open(input_json, "r") as fp:
+                    master_pd_types = json.load(fp)
+            master_pd_types.update(
+                {"n_sale_dts_df": n_sale_dts_df.dtypes.map(str).to_dict()}
+            )
+            with open("master_pd_types.json", "w") as fp:
+                json.dump(master_pd_types, fp)
             write_df_to_sql(n_sale_dts_df, "sid_n_sale_dts", dtypes_dict)
             stop_instance()
             del n_sale_dts_df
@@ -1541,6 +1570,7 @@ def rolling_7d_qty_stats(df, levels, to_sql=False):
     # For larger data (shop-item-date level), upload results directly to SQL table,
     # instead of merging with other columns
     if len(levels) == 2:
+        roll_7d_qty_df = _downcast(roll_7d_qty_df)
         roll_7d_qty_df = _add_col_prefix(roll_7d_qty_df, "sid_")
 
         logging.info(
@@ -1657,6 +1687,7 @@ def expanding_cv2_of_qty(df, levels, to_sql=False):
     # For larger data (shop-item-date level), upload results directly to SQL table,
     # instead of merging with other columns
     if len(levels) == 2:
+        expand_qty_cv2_df = _downcast(expand_qty_cv2_df)
         expand_qty_cv2_df = _add_col_prefix(expand_qty_cv2_df, "sid_")
 
         logging.info(
@@ -1721,17 +1752,13 @@ def expanding_avg_demand_int(df, levels):
     """
     if len(levels) == 2:
         start_instance()
-        sql_str = (
-            "SELECT "
-            "{0} "
-            "FROM sid_n_sale_dts "
-            "ORDER BY {1};"
-        )
+        sql_str = "SELECT " "{0} " "FROM sid_n_sale_dts " "ORDER BY {1};"
         sql = SQL(sql_str).format(
             SQL(", ").join(
                 [
                     Identifier(col)
-                    for col in [level + "_id" for level in levels] + ["sale_date"]
+                    for col in [level + "_id" for level in levels]
+                    + ["sale_date"]
                     + [f"sid_{'_'.join(levels)}_cnt_sale_dts_before_day"]
                 ]
             ),
@@ -1740,11 +1767,11 @@ def expanding_avg_demand_int(df, levels):
                     Identifier(col)
                     for col in [level + "_id" for level in levels] + ["sale_date"]
                 ]
-            )
+            ),
         )
+        # pass master dictionary of data types to df_from_sql_query function
         sale_dts_df = df_from_sql_query(
-            sql,
-            date_list=["sale_date"]
+            sql, master_pd_types["n_sale_dts_df"], date_list=["sale_date"]
         )
         df[f"{'_'.join(levels)}_expanding_adi"] = (
             df[f"{'_'.join(levels)}_days_since_first_sale"]
@@ -1852,6 +1879,7 @@ def expanding_qty_sold_stats(df, levels, to_sql=False):
     # For larger data (shop-item-date level), upload results directly to SQL table,
     # instead of merging with other columns
     if len(levels) == 2:
+        expand_qty_stats_df = _downcast(expand_qty_stats_df)
         expand_qty_stats_df = _add_col_prefix(expand_qty_stats_df, "sid_")
 
         logging.info(
@@ -2026,6 +2054,7 @@ def expanding_time_bw_sales_stats(df, levels, to_sql=False):
     # For larger data (shop-item-date level), upload results directly to SQL table,
     # instead of merging with other columns
     if len(levels) == 2:
+        expand_bw_sales_stats_df = _downcast(expand_bw_sales_stats_df)
         expand_bw_sales_stats_df = _add_col_prefix(expand_bw_sales_stats_df, "sid_")
 
         logging.info(
@@ -2150,9 +2179,30 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         df = _downcast(df)
         df.rename(columns={"date": "sale_date"}, inplace=True)
         dtypes_dict = _map_to_sql_dtypes(df)
+
+        input_json = "master_pd_types.json"
+        types_json = Path(input_json)
+        if types_json.is_file():
+            with open(input_json, "r") as fp:
+                master_pd_types = json.load(fp)
+        else:
+            build_item_lvl_features(items_df, categories_df)
+            with open(input_json, "r") as fp:
+                master_pd_types = json.load(fp)
+        master_pd_types.update({"df": df.dtypes.map(str).to_dict()})
+
         write_df_to_sql(df, "df_temp", dtypes_dict)
+
+        non_zero_qty_level_dates = _downcast(non_zero_qty_level_dates)
         non_zero_qty_level_dates.rename(columns={"date": "sale_date"}, inplace=True)
         dtypes_dict = _map_to_sql_dtypes(non_zero_qty_level_dates)
+        master_pd_types.update(
+            {
+                "non_zero_qty_level_dates": non_zero_qty_level_dates.dtypes.map(
+                    str
+                ).to_dict()
+            }
+        )
         write_df_to_sql(non_zero_qty_level_dates, "non_zero_temp", dtypes_dict)
 
         # per https://www.psycopg.org/docs/sql.html#psycopg2.sql.SQL
@@ -2179,21 +2229,28 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
             SQL(", ").join(
                 [
                     Identifier(col)
-                    for col in [colname for colname in df_cols if colname in non_zero_cols]
+                    for col in [
+                        colname for colname in df_cols if colname in non_zero_cols
+                    ]
                 ]
             ),
             # 1: columns that only exist in main df
             SQL(", ").join(
                 [
                     Identifier(col)
-                    for col in [colname for colname in df_cols if colname not in non_zero_cols]
+                    for col in [
+                        colname for colname in df_cols if colname not in non_zero_cols
+                    ]
                 ]
             ),
             # 2: columns that only exist in main df, with "null as" added
-            SQL("%(none)s AS ") + SQL(", %(none)s AS ").join(
+            SQL("%(none)s AS ")
+            + SQL(", %(none)s AS ").join(
                 [
                     Identifier(col)
-                    for col in [colname for colname in df_cols if colname not in non_zero_cols]
+                    for col in [
+                        colname for colname in df_cols if colname not in non_zero_cols
+                    ]
                 ]
             ),
             # 3-8: columns to merge on, with table identifiers
@@ -2211,12 +2268,13 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
                     for col in [level + "_id" for level in levels] + ["sale_date"]
                 ]
             ),
-            Identifier("c", f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty")
+            Identifier("c", f"{'_'.join(levels)}_date_diff_bw_last_and_prev_qty"),
         )
 
         params = {"dt": first_day, "none": None}
         df = df_from_sql_query(
             sql,
+            {**master_pd_types["non_zero_qty_level_dates"], **master_pd_types["df"]},
             params=params,
             date_list=["sale_date"],
             delete_tables=["df_temp", "non_zero_temp"],
@@ -2249,12 +2307,21 @@ def diff_bw_last_and_sec_to_last_qty(df, levels):
         df = _downcast(df)
         df.rename(columns={"date": "sale_date"}, inplace=True)
         dtypes_dict = _map_to_sql_dtypes(df)
+        master_pd_types.update({"df": df.dtypes.map(str).to_dict()})
+        with open("master_pd_types.json", "w") as fp:
+            json.dump(master_pd_types, fp)
         write_df_to_sql(df, "df_temp", dtypes_dict)
         del df
-        sql = SQL("SELECT * FROM df_temp WHERE sale_date <> %(dt)s ORDER BY shop_id, item_id, sale_date;")
+        sql = SQL(
+            "SELECT * FROM df_temp WHERE sale_date <> %(dt)s ORDER BY shop_id, item_id, sale_date;"
+        )
         params = {"dt": first_day}
         df = df_from_sql_query(
-            sql, params=params, date_list=["sale_date"], delete_tables=["df_temp"]
+            sql,
+            master_pd_types["df"],
+            params=params,
+            date_list=["sale_date"],
+            delete_tables=["df_temp"],
         )
         df.rename(columns={"sale_date": "date"}, inplace=True)
     else:
@@ -2373,12 +2440,13 @@ def _expanding_max(idx, df, levels):
     pandas multi-index Series
     """
     if isinstance(idx, int):
-        df.index = pd.Index([idx] * len(df)).set_names([level + "_id" for level in levels])
+        df.index = pd.Index([idx] * len(df)).set_names(
+            [level + "_id" for level in levels]
+        )
     elif isinstance(idx, tuple):
-        df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names([level + "_id" for level in levels])
-    # df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names(
-    #     [level + "_id" for level in levels]
-    # )
+        df.index = pd.MultiIndex.from_tuples([idx] * len(df)).set_names(
+            [level + "_id" for level in levels]
+        )
     return (
         df.set_index("date", append=True)[f"{'_'.join(levels)}_qty_sold_day"]
         .expanding()
@@ -2517,7 +2585,7 @@ def build_item_date_lvl_features(
         "item_category_id"
     )["cat_qty_sold_day"].apply(lambda x: x.rolling(7, 1).sum().shift().fillna(0))
 
-    # merge rolling weeekly category quantity totals onto item-date dataset
+    # merge rolling weekly category quantity totals onto item-date dataset
     item_date_level_features = item_date_level_features.merge(
         cat_date_total_qty[["item_category_id", "date", "cat_qty_sold_last_7d"]],
         on=["item_category_id", "date"],
@@ -2595,7 +2663,7 @@ def build_item_date_lvl_features(
     # column with count of spikes in quantity sold before current day
     item_date_level_features["item_n_spikes_before_day"] = res.astype(np.int8)
 
-    # item_date_level_features = _downcast(item_date_level_features)
+    item_date_level_features = _downcast(item_date_level_features)
     item_date_level_features = _add_col_prefix(item_date_level_features, "id_")
 
     logging.info(
@@ -2760,7 +2828,7 @@ def build_shop_date_lvl_features(
         ["_daily_cts_wo_lag", "_comb_col"], axis=1, inplace=True
     )
 
-    # shop_date_level_features = _downcast(shop_date_level_features)
+    shop_date_level_features = _downcast(shop_date_level_features)
     shop_date_level_features = _add_col_prefix(shop_date_level_features, "sd_")
 
     logging.info(
@@ -2971,6 +3039,20 @@ def build_shop_item_date_lvl_features(
     shop_item_date_level_features = _downcast(shop_item_date_level_features)
     shop_item_date_level_features.rename(columns={"date": "sale_date"}, inplace=True)
     dtypes_dict = _map_to_sql_dtypes(shop_item_date_level_features)
+
+    input_json = "master_pd_types.json"
+    types_json = Path(input_json)
+    if types_json.is_file():
+        with open(input_json, "r") as fp:
+            master_pd_types = json.load(fp)
+    else:
+        build_item_lvl_features(items_df, categories_df)
+        with open(input_json, "r") as fp:
+            master_pd_types = json.load(fp)
+    master_pd_types.update(
+        {"sid": shop_item_date_level_features.dtypes.map(str).to_dict()}
+    )
+
     start_instance()
     write_df_to_sql(shop_item_date_level_features, "df_temp", dtypes_dict)
     del shop_item_date_level_features
@@ -2993,6 +3075,7 @@ def build_shop_item_date_lvl_features(
     coefs_var = _downcast(coefs_var)
     coefs_var.rename(columns={"date": "sale_date"}, inplace=True)
     dtypes_dict = _map_to_sql_dtypes(coefs_var)
+    master_pd_types.update({"coefs_var": coefs_var.dtypes.map(str).to_dict()})
     write_df_to_sql(coefs_var, "coefs_var", dtypes_dict)
     del coefs_var
 
@@ -3014,6 +3097,7 @@ def build_shop_item_date_lvl_features(
     qty_mads = _downcast(qty_mads)
     qty_mads.rename(columns={"date": "sale_date"}, inplace=True)
     dtypes_dict = _map_to_sql_dtypes(qty_mads)
+    master_pd_types.update({"qty_mads": qty_mads.dtypes.map(str).to_dict()})
     write_df_to_sql(qty_mads, "qty_mads", dtypes_dict)
     del qty_mads
 
@@ -3035,8 +3119,12 @@ def build_shop_item_date_lvl_features(
     qty_median_ads = _downcast(qty_median_ads)
     qty_median_ads.rename(columns={"date": "sale_date"}, inplace=True)
     dtypes_dict = _map_to_sql_dtypes(qty_median_ads)
+    master_pd_types.update({"qty_median_ads": qty_median_ads.dtypes.map(str).to_dict()})
     write_df_to_sql(qty_median_ads, "qty_median_ads", dtypes_dict)
     del qty_median_ads
+
+    with open("master_pd_types.json", "w") as fp:
+        json.dump(master_pd_types, fp)
 
     # PERFORM JOIN OF ALL TABLES INSIDE RDS AND SAVE TO NEW DF
     sql = SQL(
@@ -3055,15 +3143,19 @@ def build_shop_item_date_lvl_features(
 
     shop_item_date_level_features = df_from_sql_query(
         sql,
+        {
+            **master_pd_types["coefs_var"],
+            **master_pd_types["qty_mads"],
+            **master_pd_types["qty_median_ads"],
+            **master_pd_types["items"],
+            **master_pd_types["sid"],
+        },
         date_list=["sale_date"],
         delete_tables=["df_temp", "coefs_var", "qty_mads", "qty_median_ads"],
     )
     shop_item_date_level_features.rename(
-        columns={
-            "sale_date": "date",
-            "i_item_category_id": "item_category_id"
-        },
-        inplace=True
+        columns={"sale_date": "date", "i_item_category_id": "item_category_id"},
+        inplace=True,
     )
 
     results = []
@@ -3238,10 +3330,10 @@ def main():
     )
 
     # statements to suppress irrelevant logging by boto3-related libraries
-    logging.getLogger('boto3').setLevel(logging.CRITICAL)
-    logging.getLogger('botocore').setLevel(logging.CRITICAL)
-    logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
-    logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+    logging.getLogger("boto3").setLevel(logging.CRITICAL)
+    logging.getLogger("botocore").setLevel(logging.CRITICAL)
+    logging.getLogger("s3transfer").setLevel(logging.CRITICAL)
+    logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
     logging.info(f"The Python version is {platform.python_version()}.")
     logging.info(f"The pandas version is {pd.__version__}.")
