@@ -321,7 +321,7 @@ def main():
             "Use 'summary' or 'query'".format(args.command)
         )
 
-    fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(message)s"
+    fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(lineno)-7d %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
     log_dir = Path.cwd().joinpath("rds_db")
     path = Path(log_dir)
