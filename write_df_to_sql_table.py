@@ -90,6 +90,10 @@ def write_df_to_sql(df, table_name, dtypes_dict):
     port = db_details["port"]
     dbase = db_details["database"]
 
+    # per https://docs.sqlalchemy.org/en/14/core/tutorial.html#connecting
+    # The return value of create_engine() is an instance of Engine,
+    # and it represents the core interface to the database,
+    # adapted through a dialect that handles the details of the database and DBAPI in use.
     engine = create_engine(
         "postgresql+psycopg2://"
         + user
@@ -126,8 +130,10 @@ def write_df_to_sql(df, table_name, dtypes_dict):
             "WHERE table_schema = 'public' AND table_name = :name"
     )
     params = {"name": table_name}
+    # Acquire a database connection
+    conn = engine.connect()
     # Log size of newly created table
     try:
-        logging.info(f"Created {table_name} table's size is: {engine.execute(sql, params).fetchall()[1]}")
+        logging.info(f"Created {table_name} table's size is: {conn.execute(sql, params).fetchall()[0][1]}")
     except:
-        logging.debug(f"Table size query on {table_name} table was not executed.")
+        logging.exception(f"Table size query on {table_name} table was not executed.")
