@@ -134,6 +134,6 @@ def write_df_to_sql(df, table_name, dtypes_dict):
     conn = engine.connect()
     # Log size of newly created table
     try:
-        logging.info(f"Created {table_name} table's size is: {conn.execute(sql, params).fetchall()[0][1]}")
+        logging.info(f"Created {table_name} table's size is: {conn.execute(sql, params).fetchall()[0][1]:,}")
     except:
         logging.exception(f"Table size query on {table_name} table was not executed.")
