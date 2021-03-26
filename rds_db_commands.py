@@ -17,6 +17,7 @@ Usage: run from the command line as such:
 
 """
 import argparse
+from collections import defaultdict
 import datetime
 import logging
 from pathlib import Path
@@ -199,15 +200,86 @@ def run_query(csv_dir):
         cur = conn.cursor()
 
         # prepare a query
-        query = (
-            "SELECT id_cat_qty_sold_last_7d, "
-            "COUNT(id_cat_qty_sold_last_7d) + "
-            "COUNT(CASE WHEN id_cat_qty_sold_last_7d "
-            "IS NULL THEN 1 ELSE NULL END) as CountOf "
-            "FROM item_dates "
-            "GROUP BY id_cat_qty_sold_last_7d "
-            "ORDER BY id_cat_qty_sold_last_7d"
+        # query = (
+        #     "SELECT id_cat_qty_sold_last_7d, "
+        #     "COUNT(id_cat_qty_sold_last_7d) + "
+        #     "COUNT(CASE WHEN id_cat_qty_sold_last_7d "
+        #     "IS NULL THEN 1 ELSE NULL END) as CountOf "
+        #     "FROM item_dates "
+        #     "GROUP BY id_cat_qty_sold_last_7d "
+        #     "ORDER BY id_cat_qty_sold_last_7d"
+        # )
+        col_list = ["shop_id", "item_id", "date"]
+        level = 'item_id'
+
+        col_name = (
+            f"num_unique_"
+            f"{[col for col in col_list if col not in (level, 'date')][0].replace('_id','s')}"
+            f"_prior_to_day"
         )
+
+        sql_str = (
+            "WITH cte AS ("
+            "SELECT a.*, {0}, {1} "
+            "FROM df_temp AS a "
+            "LEFT JOIN group_dates_w_val_cts AS b "
+            "ON {2} = {3} AND {5} = {6} "
+            "LEFT JOIN daily_cts_wo_lag AS c "
+            "ON {2} = {4} AND {5} = {7} "
+            "WHERE {0} IS NULL OR {1} IS NULL) "
+            "SELECT COUNT(*) FROM cte;"
+        )
+        query = (
+            "WITH cte AS ("
+            "SELECT a.*, b.num_unique_shops_prior_to_day, c._daily_cts_wo_lag "
+            "FROM df_temp AS a "
+            "LEFT JOIN group_dates_w_val_cts AS b "
+            "ON a.item_id = b.item_id AND a.sale_date = b.sale_date "
+            "LEFT JOIN daily_cts_wo_lag AS c "
+            "ON a.item_id = c.item_id AND a.sale_date = c.sale_date "
+            # "WHERE b.num_unique_shops_prior_to_day IS NULL or c._daily_cts_wo_lag IS NULL) "
+            # "WHERE b.num_unique_shops_prior_to_day IS NULL) "
+            "WHERE c._daily_cts_wo_lag IS NULL) "
+            "SELECT COUNT(*) FROM CTE"
+        )
+        query = (
+            "SELECT COUNT(*) FROM daily_cts_wo_lag"
+        )
+        query = (
+            "WITH cte AS ("
+            "SELECT a.*, b.num_unique_shops_prior_to_day, c._daily_cts_wo_lag "
+            "FROM df_temp AS a "
+            "LEFT JOIN group_dates_w_val_cts AS b "
+            "ON a.item_id = b.item_id "
+            "LEFT JOIN daily_cts_wo_lag AS c "
+            "ON a.item_id = c.item_id "
+            "WHERE b.num_unique_shops_prior_to_day IS NULL or c._daily_cts_wo_lag IS NULL) "
+            # "WHERE b.num_unique_shops_prior_to_day IS NULL) "
+            # "WHERE c._daily_cts_wo_lag IS NULL) "
+            "SELECT COUNT(*) FROM CTE"
+        )
+        # check how many rows have a null value in any column
+        query = (
+            "SELECT COUNT(*) AS n_null_rows "
+            "FROM (SELECT * FROM test_table WHERE NOT (test_table IS NOT NULL)) sub"
+        )
+
+        # query = SQL(sql_str).format(
+        #     # 0: column from group_dates_w_val_cts
+        #     Identifier("b", col_name),
+        #     # 1: column from daily_cts_wo_lag
+        #     Identifier("c", "_daily_cts_wo_lag"),
+        #     # 2-7: columns to merge on
+        #     Identifier("a", level),
+        #     Identifier("b", level),
+        #     Identifier("c", level),
+        #     Identifier("a", "sale_date"),
+        #     Identifier("b", "sale_date"),
+        #     Identifier("c", "sale_date"),
+        #     # 8-9: columns to sort by
+        #     Identifier("a", level),
+        #     Identifier("a", "sale_date"),
+        # )
         logging.debug(f"SQL query to be executed: {query}")
 
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
@@ -230,6 +302,23 @@ def run_query(csv_dir):
         if conn is not None:
             conn.close()
             logging.info("Database connection closed.")
+
+
+val_err_dict = defaultdict(int)
+
+def _cast_by_col(df, pd_types_dict):
+    for col in df.columns:
+        try:
+            df[col] = df[col].astype(pd_types_dict[col])
+        # if column does not exist in dictionary, leave it as is
+        except KeyError:
+            pass
+        # if null (or some other) values appear that cannot be converted to int type
+        # keep a counter of how many chunks and which columns ran into this problem
+        except ValueError:
+            global val_err_dict
+            val_err_dict[col] += 1
+    return df
 
 
 @Timer(logger=logging.info)
@@ -264,8 +353,9 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
         logging.debug(f"SQL query to be executed by read_sql_query(): {sql_query.as_string(conn)}")
         df = pd.concat(
             [
-                chunk.astype({k: v for k, v in pd_types.items() if k in chunk.columns})
-                for chunk in pd.read_sql_query(
+                # chunk.astype({k: v for k, v in pd_types.items() if k in chunk.columns}, errors='ignore')
+                # chunk.astype({k: v for k, v in pd_types.items() if k in chunk.columns})
+                _cast_by_col(chunk, pd_types) for chunk in pd.read_sql_query(
                     sql_query, conn, params=params, parse_dates=date_list, chunksize=10000
                 )
             ],
@@ -291,6 +381,7 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
         logging.exception("Exception occurred")
 
     finally:
+        logging.debug(f"val_err_dict at the end of df_from_sql_query() is {val_err_dict}")
         if conn is not None:
             conn.close()
             logging.info("Database connection closed.")
