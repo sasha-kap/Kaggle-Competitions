@@ -130,10 +130,18 @@ def write_df_to_sql(df, table_name, dtypes_dict):
             "WHERE table_schema = 'public' AND table_name = :name"
     )
     params = {"name": table_name}
-    # Acquire a database connection
-    conn = engine.connect()
-    # Log size of newly created table
+
+    conn = None
     try:
+        # Acquire a database connection
+        conn = engine.connect()
+        # Log size of newly created table
         logging.info(f"Created {table_name} table's size is: {conn.execute(sql, params).fetchall()[0][1]:,}")
-    except:
+
+    except (Exception, SQLAlchemyError) as error:
         logging.exception(f"Table size query on {table_name} table was not executed.")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
