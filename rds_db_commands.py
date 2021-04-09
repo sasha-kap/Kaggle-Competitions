@@ -1,9 +1,32 @@
 """
 Functions:
-1) Query existing AWS RDS PostgreSQL database to obtain information on tables and
+
+query_table_info
+- Query existing AWS RDS PostgreSQL database to obtain information on tables and
 columns
-2) Run specified SQL query and save results to CSV file
-2) Write results from SQL query to pandas DataFrame
+
+run_query
+- Run specified SQL query and save results to CSV file
+
+drop_tables
+- Connect to the PostgreSQL database and execute SQL query that drops specified
+tables.
+
+get_table_size:
+- Connect to the PostgreSQL database and query and log the size of specified
+table.
+
+create_db_table_from_query:
+- Connect to the PostgreSQL database and execute SQL query that creates a new
+database table.
+
+df_from_sql_table
+- Connect to the PostgreSQL database and export existing database table to
+pandas dataframe.
+
+df_from_sql_query
+- Connect to the PostgreSQL database and write results of SQL query to pandas
+DataFrame.
 
 Copyright (c) 2021 Sasha Kapralov
 Licensed under the MIT License (see LICENSE for details)
@@ -14,6 +37,7 @@ Usage: run from the command line as such:
 
     python3 rds_db_commands.py summary
     python rds_db_commands.py query --stop
+    python rds_db_commands.py drop -t temp temp2
 
 """
 import argparse
@@ -25,6 +49,9 @@ from pathlib import Path
 import pandas as pd
 import psycopg2
 from psycopg2.sql import SQL, Identifier
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql import text
 
 # Import the 'config' function from the config.py file
 from config import config
@@ -280,6 +307,11 @@ def run_query(csv_dir):
         #     Identifier("a", level),
         #     Identifier("a", "sale_date"),
         # )
+
+        query = (
+            "SELECT COUNT(*) FROM sid_big_query_result"
+        )
+
         logging.debug(f"SQL query to be executed: {query}")
 
         outputquery = "COPY ({0}) TO STDOUT WITH CSV HEADER".format(query)
@@ -304,9 +336,168 @@ def run_query(csv_dir):
             logging.info("Database connection closed.")
 
 
+@Timer(logger=logging.info)
+def drop_tables(delete_tables, conn=None):
+    """Connect to the PostgreSQL database and execute SQL query that drops
+    specified tables.
+
+    Parameters:
+    -----------
+    delete_tables : list
+        List of tables to delete from PostgreSQL database
+    conn :
+
+    Returns:
+    --------
+    None
+    """
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+        # connect to the PostgreSQL server
+        if conn is None:
+            conn = psycopg2.connect(**db_params)
+        # open a cursor to perform database operations
+        # as context manager (see https://www.psycopg.org/docs/usage.html)
+        with conn.cursor() as cur:
+            sql = SQL("DROP TABLE IF EXISTS {0};").format(
+                SQL(", ").join([Identifier(table) for table in delete_tables])
+            )
+            cur.execute(sql)
+            conn.commit()
+
+        logging.info(
+            f"The following tables were successfully deleted "
+            f"from DB: {', '.join(delete_tables)}"
+        )
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
+
+def get_table_size(table_name):
+    """Connect to the PostgreSQL database and query and log the size of
+    specified table.
+
+    Parameters:
+    -----------
+    table_name : str
+        Name of table for which size needs to be queried
+
+    Returns:
+    --------
+    None
+    """
+    # Create dictionary of database configuration details
+    db_details = config(section="postgresql")
+
+    user = db_details["user"]
+    passw = db_details["password"]
+    host = db_details["host"]
+    port = db_details["port"]
+    dbase = db_details["database"]
+
+    conn = None
+    try:
+        engine = create_engine(
+            "postgresql+psycopg2://"
+            + user
+            + ":"
+            + passw
+            + "@"
+            + host
+            + ":"
+            + str(port)
+            + "/"
+            + dbase
+        )
+
+        sql = text(
+            "SELECT table_name, pg_relation_size(quote_ident(table_name)) "
+                "FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_name = :name"
+        )
+        params = {"name": table_name}
+        # Acquire a database connection
+        conn = engine.connect()
+        # Log size of specified table
+        logging.info(f"Created {table_name} table's size is: {conn.execute(sql, params).fetchall()[0][1]:,}")
+
+    except (Exception, SQLAlchemyError) as error:
+        logging.exception(f"Table size query on {table_name} table was not executed.")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
+
+@Timer(logger=logging.info)
+def create_db_table_from_query(sql_query, params=None):
+    """Connect to the PostgreSQL database and execute SQL query that creates
+    a new database table.
+
+    Parameters:
+    -----------
+    sql_query : SQLAlchemy Selectable (select or text object)
+        SQL query to be executed
+    params : list, tuple or dict, optional, default: None
+        List of parameters to pass to execute method
+
+    Returns:
+    --------
+    None
+    """
+    conn = None
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+
+        # connect to the PostgreSQL server
+        logging.info("Connecting to the PostgreSQL database...")
+        conn = psycopg2.connect(**db_params)
+
+        # create a cursor to perform database operations
+        cur = conn.cursor()
+
+        # execute the provided SQL query
+        cur.execute(sql_query, params)
+
+        # Make the changes to the database persistent
+        conn.commit()
+        # close the communication with the PostgreSQL
+        cur.close()
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+        # query and log size of newly created table
+        get_table_size(params["db_table"])
+
+
 val_err_dict = defaultdict(int)
 
 def _cast_by_col(df, pd_types_dict):
+    """Cast each column in input dataframe to specified data type.
+
+    Parameters:
+    -----------
+    df : pandas DataFrame
+        Dataframe with columns that need to be cast to new data types
+    pd_types_dict : dict
+        Dictionary of dataframe data types to be used to cast table columns
+
+    Returns:
+    --------
+    pandas DataFrame
+    """
     for col in df.columns:
         try:
             df[col] = df[col].astype(pd_types_dict[col])
@@ -319,6 +510,81 @@ def _cast_by_col(df, pd_types_dict):
             global val_err_dict
             val_err_dict[col] += 1
     return df
+
+
+def df_from_sql_table(tbl, pd_types, date_list=None, delete_tables=None):
+    """Connect to the PostgreSQL database and export existing database table
+    to pandas dataframe.
+
+    Parameters:
+    -----------
+    tbl : str
+        Name of table to export to dataframe
+    pd_types : dict
+        Dictionary of dataframe data types to be used to cast table columns
+    date_list : list or dict, optional, default: None
+        List of column names to parse as dates
+    delete_tables : list, optional, default: None
+        List of tables to delete from PostgreSQL after exporting
+
+    Returns:
+    --------
+    pandas DataFrame
+
+    Note:
+    -----
+    This function currently does not handle deleting tables from database
+    following creation of pandas dataframe, because of different conn object
+    creation procedures in this and drop_tables functions. The drop_tables
+    function is to be called separately following the call to this function,
+    if needed.
+    """
+    # Create dictionary of database configuration details
+    db_details = config(section="postgresql")
+
+    user = db_details["user"]
+    passw = db_details["password"]
+    host = db_details["host"]
+    port = db_details["port"]
+    dbase = db_details["database"]
+
+    conn = None
+    try:
+        engine = create_engine(
+            "postgresql+psycopg2://"
+            + user
+            + ":"
+            + passw
+            + "@"
+            + host
+            + ":"
+            + str(port)
+            + "/"
+            + dbase
+        )
+        conn = engine.connect().execution_options(stream_results=True)
+
+        chunk_list = [
+            _cast_by_col(chunk, pd_types) for chunk in pd.read_sql_table(
+                tbl, conn, parse_dates=date_list, chunksize=10000
+            )
+        ]
+
+        df = pd.concat(
+            chunk_list,
+            ignore_index=True,
+        )
+
+        return df
+
+    except (Exception, SQLAlchemyError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        logging.debug(f"val_err_dict at the end of df_from_sql_table() is {val_err_dict}")
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
 
 
 @Timer(logger=logging.info)
@@ -344,12 +610,30 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
     pandas DataFrame
 
     """
+    # Create dictionary of database configuration details
+    db_details = config(section="postgresql")
+
+    user = db_details["user"]
+    passw = db_details["password"]
+    host = db_details["host"]
+    port = db_details["port"]
+    dbase = db_details["database"]
+
     conn = None
     try:
-        # read connection parameters
-        db_params = config(section="postgresql")
-        # connect to the PostgreSQL server
-        conn = psycopg2.connect(**db_params)
+        engine = create_engine(
+            "postgresql+psycopg2://"
+            + user
+            + ":"
+            + passw
+            + "@"
+            + host
+            + ":"
+            + str(port)
+            + "/"
+            + dbase
+        )
+        conn = engine.connect().execution_options(stream_results=True)
         logging.debug(f"SQL query to be executed by read_sql_query(): {sql_query.as_string(conn)}")
         df = pd.concat(
             [
@@ -361,28 +645,18 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
             ],
             ignore_index=True,
         )
-        if delete_tables is not None:
-            # open a cursor to perform database operations
-            # as context manager (see https://www.psycopg.org/docs/usage.html)
-            with conn.cursor() as cur:
-                sql = SQL("DROP TABLE IF EXISTS {0};").format(
-                    SQL(", ").join([Identifier(table) for table in delete_tables])
-                )
-                cur.execute(sql)
-                conn.commit()
-
-            logging.info(
-                f"The following tables were successfully deleted "
-                f"from DB: {', '.join(delete_tables)}"
-            )
         return df
 
-    except (Exception, psycopg2.DatabaseError) as error:
+    except (Exception, SQLAlchemyError) as error:
         logging.exception("Exception occurred")
+
+    else:
+        if delete_tables is not None:
+            drop_tables(delete_tables, conn)
 
     finally:
         logging.debug(f"val_err_dict at the end of df_from_sql_query() is {val_err_dict}")
-        if conn is not None:
+        if not conn.closed:
             conn.close()
             logging.info("Database connection closed.")
 
@@ -392,7 +666,7 @@ def main():
     parser.add_argument(
         "command",
         metavar="<command>",
-        help="'summary' or 'query'",
+        help="'summary', 'query' or 'drop'",
     )
     parser.add_argument(
         "--stop",
@@ -400,16 +674,24 @@ def main():
         action="store_true",
         help="stop RDS instance after querying (if included) or not (if not included)",
     )
+    parser.add_argument(
+        '-t',
+        '--tables-list',
+        nargs='+',
+        default=[],
+        help="list of tables to drop from database"
+    )
 
     args = parser.parse_args()
 
     if args.command not in [
         "summary",
         "query",
+        "drop",
     ]:
         print(
             "'{}' is not recognized. "
-            "Use 'summary' or 'query'".format(args.command)
+            "Use 'summary', 'query', or 'drop'".format(args.command)
         )
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(lineno)-7d %(message)s"
@@ -440,6 +722,8 @@ def main():
         query_table_info(log_dir)
     elif args.command == "query":
         run_query(log_dir)
+    elif args.command == "drop":
+        drop_tables(args.tables_list)
 
     if args.stop == True:
         stop_instance()
