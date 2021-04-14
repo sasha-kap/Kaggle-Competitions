@@ -610,30 +610,12 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
     pandas DataFrame
 
     """
-    # Create dictionary of database configuration details
-    db_details = config(section="postgresql")
-
-    user = db_details["user"]
-    passw = db_details["password"]
-    host = db_details["host"]
-    port = db_details["port"]
-    dbase = db_details["database"]
-
     conn = None
     try:
-        engine = create_engine(
-            "postgresql+psycopg2://"
-            + user
-            + ":"
-            + passw
-            + "@"
-            + host
-            + ":"
-            + str(port)
-            + "/"
-            + dbase
-        )
-        conn = engine.connect().execution_options(stream_results=True)
+        # read connection parameters
+        db_params = config(section="postgresql")
+        # connect to the PostgreSQL server
+        conn = psycopg2.connect(**db_params)
         logging.debug(f"SQL query to be executed by read_sql_query(): {sql_query.as_string(conn)}")
         df = pd.concat(
             [
@@ -647,7 +629,7 @@ def df_from_sql_query(sql_query, pd_types, params=None, date_list=None, delete_t
         )
         return df
 
-    except (Exception, SQLAlchemyError) as error:
+    except (Exception, psycopg2.DatabaseError) as error:
         logging.exception("Exception occurred")
 
     else:
