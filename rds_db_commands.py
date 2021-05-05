@@ -1,6 +1,10 @@
 """
 Functions:
 
+set_primary_key
+- Connect to the PostgreSQL database and execute SQL query that sets primary
+key(s) on specified table(s).
+
 query_table_info
 - Query existing AWS RDS PostgreSQL database to obtain information on tables and
 columns
@@ -57,6 +61,83 @@ from sqlalchemy.sql import text
 from config import config
 from rds_instance_mgmt import start_instance, stop_instance
 from timer import Timer
+
+
+@Timer(logger=logging.info)
+def set_primary_key(table_col_dict=None, db_table_name=None, cols=None, conn=None):
+    """Connect to the PostgreSQL database and execute SQL query that sets
+    primary key(s) on specified table(s).
+
+    Parameters:
+    -----------
+    table_col_dict : dict
+        Dictionary of tables (keys) in which to set primary key(s) specified by
+        column names (values), optional, default: None
+    db_table_name : str
+        Name of table in which to set primary key(s), optional, default: None
+    cols : list
+        List of column names to set as primary key(s), optional, default: None
+    conn :
+
+    Returns:
+    --------
+    None
+    """
+    if ((table_col_dict is None and db_table_name is None) or
+        (table_col_dict is not None and db_table_name is not None)):
+        raise TypeError(
+            "Specify either dictionary of tables and column names, "
+            "or individual table name as string, not both."
+        )
+    elif ((db_table_name is not None and cols is None) or
+          (table_col_dict is not None and cols is not None)):
+        raise TypeError(
+            "Specify columns to be set as primary key either in dictionary of "
+            "table and column names, or as separate argument as string or list."
+        )
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+        # connect to the PostgreSQL server
+        if conn is None:
+            conn = psycopg2.connect(**db_params)
+        # open a cursor to perform database operations
+        # as context manager (see https://www.psycopg.org/docs/usage.html)
+        with conn.cursor() as cur:
+            if table_col_dict is not None:
+                for tbl in table_col_dict:
+                    sql = SQL("ALTER TABLE {0} ADD PRIMARY KEY ({1});").format(
+                        Identifier(tbl),
+                        SQL(", ").join([Identifier(col) for col in table_col_dict[tbl]])
+                    )
+                    cur.execute(sql)
+            else:
+                sql = SQL("ALTER TABLE {0} ADD PRIMARY KEY ({1});").format(
+                    Identifier(db_table_name),
+                    SQL(", ").join([Identifier(col) for col in cols])
+                )
+                cur.execute(sql)
+            conn.commit()
+
+        if table_col_dict is not None:
+            for tbl in table_col_dict:
+                logging.info(
+                    f"The following primary keys were successfully added to {tbl}"
+                    f": {', '.join(table_col_dict[tbl])}."
+                )
+        else:
+            logging.info(
+                f"The following primary keys were successfully added to {db_table_name}"
+                f": {', '.join(cols)}."
+            )
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
 
 # per https://www.postgresqltutorial.com/postgresql-python/connect/
 @Timer(logger=logging.info)
@@ -648,7 +729,7 @@ def main():
     parser.add_argument(
         "command",
         metavar="<command>",
-        help="'summary', 'query' or 'drop'",
+        help="'summary', 'primary', 'query' or 'drop'",
     )
     parser.add_argument(
         "--stop",
@@ -668,12 +749,13 @@ def main():
 
     if args.command not in [
         "summary",
+        "primary",
         "query",
         "drop",
     ]:
         print(
             "'{}' is not recognized. "
-            "Use 'summary', 'query', or 'drop'".format(args.command)
+            "Use 'summary', 'primary', 'query', or 'drop'".format(args.command)
         )
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(lineno)-7d %(message)s"
@@ -702,6 +784,22 @@ def main():
 
     if args.command == "summary":
         query_table_info(log_dir)
+    if args.command == "primary":
+        # set_primary_key(db_table_name='shops', cols=['shop_id'])
+        # set_primary_key(db_table_name='items', cols=['item_id'])
+        # set_primary_key(db_table_name='shop_dates', cols=['shop_id','sale_date'])
+        set_primary_key(table_col_dict={
+            # 'sid_n_sale_dts' : ['shop_id', 'item_id', 'sale_date'],
+            'sid_roll_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
+            'sid_expand_qty_cv_sqrd' : ['shop_id', 'item_id', 'sale_date'],
+            'sid_expand_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
+            'sid_expand_bw_sales_stats' : ['shop_id', 'item_id', 'sale_date'],
+            'shop_cat_dates' : ['shop_id', 'sid_item_category_id', 'sale_date'],
+            'item_dates' : ['item_id', 'sale_date'],
+            'shop_item_dates' : ['shop_id', 'item_id', 'sale_date'],
+            # 'dates' : ['sale_date'],
+        })
+
     elif args.command == "query":
         run_query(log_dir)
     elif args.command == "drop":
