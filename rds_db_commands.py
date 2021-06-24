@@ -49,6 +49,7 @@ from collections import defaultdict
 import datetime
 import logging
 from pathlib import Path
+from pprint import pformat
 
 import pandas as pd
 import psycopg2
@@ -282,6 +283,146 @@ def query_table_info(csv_dir):
 
 
 @Timer(logger=logging.info)
+def vacuum_analyze_db():
+    """Connect to the PostgreSQL database server and run VACUUM ANALYZE on database
+    to garbage-collect and collect statistics about the contents of tables in the database.
+
+    Parameters:
+    -----------
+    None
+
+    Returns:
+    --------
+    None
+    """
+
+    conn = None
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+
+        # connect to the PostgreSQL server
+        logging.info("Connecting to the PostgreSQL database...")
+        conn = psycopg2.connect(**db_params)
+        conn.set_isolation_level(psycopg2.extensions.ISOLATION_LEVEL_AUTOCOMMIT)
+
+        # create a cursor to perform database operations
+        cur = conn.cursor()
+
+        query = (
+            "VACUUM (VERBOSE, ANALYZE)"
+        )
+
+        logging.debug(f"SQL query to be executed: {query}")
+
+        # execute the provided SQL query
+        cur.execute(query)
+
+        # Make the changes to the database persistent
+        conn.commit()
+
+# for line in pprint.pformat(ds).split('\n'):
+#     logging.debug(line)
+        for line in conn.notices:
+            logging.debug(line.strip('\n'))
+
+        # logging.debug(pformat(conn.notices, indent=10))
+        # close the communication with the PostgreSQL
+        cur.close()
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
+
+@Timer(logger=logging.info)
+def print_qry_exec_plan():
+    """ Connect to the PostgreSQL database server and run EXPLAIN on a query.
+
+    Parameters:
+    -----------
+    None
+
+    Returns:
+    --------
+    None
+    """
+
+    conn = None
+    try:
+        # read connection parameters
+        db_params = config(section="postgresql")
+
+        # connect to the PostgreSQL server
+        logging.info("Connecting to the PostgreSQL database...")
+        conn = psycopg2.connect(**db_params)
+
+        # create a cursor to perform database operations
+        cur = conn.cursor()
+
+        query = (
+            # first sale date for each item in train data
+            "WITH ifd AS ("
+            "SELECT item_id, min(sale_date) AS first_item_sale_date "
+            "FROM sales_cleaned "
+            "GROUP BY item_id), "
+            # first sale date for each shop in train data
+            "sfd AS ("
+            "SELECT shop_id, min(sale_date) AS first_shop_sale_date "
+            "FROM sales_cleaned "
+            "GROUP BY shop_id), "
+            # "not new" items (items in test data that are also in train data)
+            "not_new_items AS ("
+            "SELECT DISTINCT item_id "
+            "FROM test_data "
+            "WHERE item_id IN ("
+            "SELECT DISTINCT item_id FROM sales_cleaned)), "
+            # shop-items among "not new" items that exist in test but not in train data
+            "sist AS ("
+            "SELECT td.shop_id, td.item_id "
+            "FROM test_data td "
+            "INNER JOIN not_new_items nni "
+            "ON td.item_id = nni.item_id "
+            "LEFT JOIN sales_cleaned sc "
+            "ON td.shop_id = sc.shop_id AND td.item_id = sc.item_id "
+            "WHERE sc.shop_id IS NULL AND sc.item_id IS NULL) "
+            # count total days between the latter of the first day the
+            # item was sold anywhere during train period and the first day that the shop
+            # sold any item during the train period to the end of the train period
+            "SELECT sum(days_between_sale_dts) AS total_days_to_add "
+            "FROM (SELECT sist.shop_id, sist.item_id, "
+            "make_date(2015,11,1) - "
+            "GREATEST(sfd.first_shop_sale_date, ifd.first_item_sale_date) AS days_between_sale_dts "
+            "FROM sist "
+            "LEFT JOIN ifd "
+            "ON sist.item_id = ifd.item_id "
+            "LEFT JOIN sfd "
+            "ON sist.shop_id = sfd.shop_id) sub"
+        )
+
+        logging.debug(f"SQL query to be executed: {query}")
+
+        # execute the provided SQL query
+        cur.execute("EXPLAIN (FORMAT JSON) " + query)
+        logging.debug(pformat(cur.fetchall()))
+
+        # close the communication with the PostgreSQL
+        cur.close()
+
+    except (Exception, psycopg2.DatabaseError) as error:
+        logging.exception("Exception occurred")
+
+    finally:
+        if conn is not None:
+            conn.close()
+            logging.info("Database connection closed.")
+
+
+@Timer(logger=logging.info)
 def run_query(csv_dir):
     """ Connect to the PostgreSQL database server and run specified query.
 
@@ -391,6 +532,208 @@ def run_query(csv_dir):
 
         query = (
             "SELECT COUNT(*) FROM sid_big_query_result"
+        )
+
+        query = (
+            "SELECT * FROM "
+            "(SELECT DISTINCT d_modern_education_share AS values, "
+            "'d_modern_education_share' AS column "
+            "FROM dates) a "
+            "UNION ALL "
+            "(SELECT DISTINCT d_old_education_build_share AS values, "
+            "'d_old_education_build_share' AS column "
+            "FROM dates) "
+        )
+
+        query = (
+            "SELECT DISTINCT id_num_unique_shops_prior_to_day AS values, "
+            "'id_num_unique_shops_prior_to_day' AS column "
+            "FROM item_dates"
+        )
+
+        query = (
+            "SELECT * FROM ("
+            "(SELECT DISTINCT i_item_cat_grouped_by_game_console AS values, "
+            "'i_item_cat_grouped_by_game_console' AS column "
+            "FROM items) "
+            "UNION ALL "
+            "(SELECT DISTINCT i_item_category_broad AS values, "
+            "'i_item_category_broad' AS column "
+            "FROM items) "
+            "UNION ALL "
+            "(SELECT DISTINCT i_item_category_name AS values, "
+            "'i_item_category_name' AS column "
+            "FROM items)) a"
+        )
+
+        query = (
+            "SELECT * FROM shops"
+        )
+
+        query = (
+            "WITH sid AS ("
+                "SELECT DISTINCT shop_id FROM shop_item_dates WHERE sale_date >= make_date(2015,10,1) "
+                "AND sale_date <= make_date(2015,10,31)"
+            ") "
+            "SELECT sid.shop_id FROM sid "
+            "LEFT JOIN shops s "
+            "ON sid.shop_id = s.shop_id "
+            "WHERE s.shop_id IS NULL"
+        )
+
+        query = (
+            "SELECT DISTINCT id_num_unique_shops_prior_to_day AS unique_num_unique_shops_prior_to_day "
+            "FROM item_dates"
+        )
+
+        query = (
+            "SELECT item_id, count(sale_date) AS total_days FROM item_dates "
+            "WHERE item_id in (SELECT item_id FROM item_dates WHERE id_item_qty_sold_day > 1) "
+            "GROUP BY item_id"
+        )
+
+        query = (
+            "SELECT item_id, sale_date, id_item_qty_sold_day, id_item_date_diff_bw_last_and_prev_qty "
+            "FROM item_dates "
+            "WHERE item_id in (9338, 21084, 22002) "
+            "ORDER BY item_id, sale_date"
+        )
+
+        query = (
+            "SELECT count(id) AS count_ids, "
+            "count(shop_id) AS count_shops, count(item_id) AS count_items "
+            "FROM test_data"
+        )
+
+        # shop-items among "not new" items that exist in test but not in train data
+        query = (
+            "WITH not_new_items AS ("
+            "SELECT DISTINCT item_id "
+            "FROM test_data "
+            "WHERE item_id IN ("
+            "SELECT DISTINCT item_id FROM sales_cleaned)) "
+            "SELECT td.id, td.shop_id, td.item_id "
+            "FROM test_data td "
+            "INNER JOIN not_new_items nni "
+            "ON td.item_id = nni.item_id "
+            "LEFT JOIN sales_cleaned sc "
+            "ON td.shop_id = sc.shop_id AND td.item_id = sc.item_id "
+            "WHERE sc.shop_id IS NULL AND sc.item_id IS NULL "
+            "ORDER BY shop_id, item_id"
+        )
+
+        query = (
+            "SELECT DISTINCT item_id "
+            "FROM test_data WHERE item_id NOT IN ("
+            "SELECT DISTINCT item_id FROM sales_cleaned)"
+        )
+
+        # shop-items with their earliest sale date in train data in Feb 2013 or later
+        query = (
+            "SELECT shop_id, item_id, sid_item_category_id, sale_date, sid_shop_item_qty_sold_day "
+            "FROM shop_item_dates "
+            "WHERE (shop_id, item_id, sale_date) IN ("
+            "SELECT shop_id, item_id, min(sale_date) "
+            "FROM shop_item_dates "
+            "GROUP BY shop_id, item_id "
+            "HAVING min(sale_date) >= make_date(2013,2,1))"
+        )
+
+        query = (
+            "WITH ifd AS ("
+            "SELECT item_id, min(sale_date) AS first_item_sale_date "
+            "FROM shop_item_dates "
+            "GROUP BY item_id), "
+            "sifd AS ("
+            "SELECT shop_id, item_id, min(sale_date) AS first_shop_item_sale_date "
+            "FROM shop_item_dates "
+            "GROUP BY shop_id, item_id) "
+            "SELECT sum(days_between_sale_dts) AS total_days_to_add "
+            "FROM (SELECT sifd.shop_id, sifd.item_id, "
+            "sifd.first_shop_item_sale_date - ifd.first_item_sale_date AS days_between_sale_dts "
+            "FROM sifd LEFT JOIN ifd "
+            "ON sifd.item_id = ifd.item_id) t1"
+        )
+        # For each item in train data, compute the total number of days between the first date
+        # that that item was sold anywhere (inclusive) and the first dates that the item was sold
+        # at each other shop (exclusive)
+        # - create table of item-first sale dates
+        # - join that table with shop-item-level table of first sale dates using item_id and
+        # calculate the difference in days between shop-item’s first sale date and item’s first sale date
+
+        query = (
+            "SELECT count(*) as total_rows FROM shop_item_dates"
+        )
+
+        # across all shop-items in train data,
+        # count total days between the latter of the first day the item was sold anywhere
+        # AND the first day that the shop sold any item (inclusive) to the day that’s
+        # currently in the data when the first observed sale happens for that shop-item
+        query = (
+            "WITH ifd AS ("
+            "SELECT item_id, min(sale_date) AS first_item_sale_date "
+            "FROM shop_item_dates "
+            "GROUP BY item_id), "
+            "sfd AS ("
+            "SELECT shop_id, min(sale_date) AS first_shop_sale_date "
+            "FROM shop_item_dates "
+            "GROUP BY shop_id), "
+            "sifd AS ("
+            "SELECT shop_id, item_id, min(sale_date) AS first_shop_item_sale_date "
+            "FROM shop_item_dates "
+            "GROUP BY shop_id, item_id) "
+            "SELECT sum(days_between_sale_dts) AS total_days_to_add "
+            "FROM (SELECT sifd.shop_id, sifd.item_id, "
+            "sifd.first_shop_item_sale_date - "
+            "GREATEST(sfd.first_shop_sale_date, ifd.first_item_sale_date) AS days_between_sale_dts "
+            "FROM sifd LEFT JOIN ifd "
+            "ON sifd.item_id = ifd.item_id "
+            "LEFT JOIN sfd "
+            "ON sifd.shop_id = sfd.shop_id) t1"
+        )
+
+        # across all shop-items in test data but not in train data, limited to items
+        # in train data, count total days between the latter of the first day the
+        # item was sold anywhere during train period and the first day that the shop
+        # sold any item during the train period to the end of the train period
+        query = (
+            # first sale date for each item in train data
+            "WITH ifd AS ("
+            "SELECT item_id, min(sale_date) AS first_item_sale_date "
+            "FROM sales_cleaned "
+            "GROUP BY item_id), "
+            # first sale date for each shop in train data
+            "sfd AS ("
+            "SELECT shop_id, min(sale_date) AS first_shop_sale_date "
+            "FROM sales_cleaned "
+            "GROUP BY shop_id), "
+            # "not new" items (items in test data that are also in train data)
+            "not_new_items AS ("
+            "SELECT DISTINCT item_id "
+            "FROM test_data "
+            "WHERE item_id IN ("
+            "SELECT DISTINCT item_id FROM sales_cleaned)), "
+            # shop-items among "not new" items that exist in test but not in train data
+            "sist AS ("
+            "SELECT td.shop_id, td.item_id "
+            "FROM test_data td "
+            "INNER JOIN not_new_items nni "
+            "ON td.item_id = nni.item_id "
+            "LEFT JOIN sales_cleaned sc "
+            "ON td.shop_id = sc.shop_id AND td.item_id = sc.item_id "
+            "WHERE sc.shop_id IS NULL AND sc.item_id IS NULL) "
+            # count total days between the latter of the first day the
+            # item was sold anywhere during train period and the first day that the shop
+            # sold any item during the train period to the end of the train period
+            "SELECT sum(days_between_sale_dts) AS total_days_to_add "
+            "FROM (SELECT sist.shop_id, sist.item_id, "
+            "make_date(2015,11,1) - "
+            "GREATEST(sfd.first_shop_sale_date, ifd.first_item_sale_date) AS days_between_sale_dts "
+            "FROM sist "
+            "LEFT JOIN ifd "
+            "ON sist.item_id = ifd.item_id "
+            "LEFT JOIN sfd "
+            "ON sist.shop_id = sfd.shop_id) sub"
         )
 
         logging.debug(f"SQL query to be executed: {query}")
@@ -729,7 +1072,7 @@ def main():
     parser.add_argument(
         "command",
         metavar="<command>",
-        help="'summary', 'primary', 'query' or 'drop'",
+        help="'summary', 'primary', 'analyze', 'explain', 'query' or 'drop'",
     )
     parser.add_argument(
         "--stop",
@@ -750,12 +1093,14 @@ def main():
     if args.command not in [
         "summary",
         "primary",
+        "analyze",
+        "explain",
         "query",
         "drop",
     ]:
         print(
             "'{}' is not recognized. "
-            "Use 'summary', 'primary', 'query', or 'drop'".format(args.command)
+            "Use 'summary', 'primary', 'analyze', 'explain', 'query', or 'drop'".format(args.command)
         )
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(lineno)-7d %(message)s"
@@ -790,16 +1135,24 @@ def main():
         # set_primary_key(db_table_name='shop_dates', cols=['shop_id','sale_date'])
         set_primary_key(table_col_dict={
             # 'sid_n_sale_dts' : ['shop_id', 'item_id', 'sale_date'],
-            'sid_roll_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
-            'sid_expand_qty_cv_sqrd' : ['shop_id', 'item_id', 'sale_date'],
-            'sid_expand_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
-            'sid_expand_bw_sales_stats' : ['shop_id', 'item_id', 'sale_date'],
-            'shop_cat_dates' : ['shop_id', 'sid_item_category_id', 'sale_date'],
-            'item_dates' : ['item_id', 'sale_date'],
-            'shop_item_dates' : ['shop_id', 'item_id', 'sale_date'],
+
+            # 'sid_roll_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
+            # 'sid_expand_qty_cv_sqrd' : ['shop_id', 'item_id', 'sale_date'],
+            # 'sid_expand_qty_stats' : ['shop_id', 'item_id', 'sale_date'],
+            # 'sid_expand_bw_sales_stats' : ['shop_id', 'item_id', 'sale_date'],
+            # 'shop_cat_dates' : ['shop_id', 'sid_item_category_id', 'sale_date'],
+            # 'item_dates' : ['item_id', 'sale_date'],
+            # 'shop_item_dates' : ['shop_id', 'item_id', 'sale_date'],
+            'test_data': ['shop_id', 'item_id'],
+            'sales_cleaned': ['shop_id', 'item_id', 'sale_date']
+
             # 'dates' : ['sale_date'],
         })
 
+    elif args.command == "analyze":
+        vacuum_analyze_db()
+    elif args.command == "explain":
+        print_qry_exec_plan()
     elif args.command == "query":
         run_query(log_dir)
     elif args.command == "drop":
