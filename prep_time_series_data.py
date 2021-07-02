@@ -10,13 +10,13 @@ Licensed under the MIT License (see LICENSE for details)
 Usage: run from the command line as such:
 
     # Perform initial cleaning on train data
-    python3 prep_time_series_data.py clean --to_sql
+    python3 prep_time_series_data.py clean --send_to_sql
 
     # Create DF of shop/item/date (or combination)-level features and write to SQL table
-    python3 prep_time_series_data.py shops --to_sql
+    python3 prep_time_series_data.py shops --send_to_sql
 
     # Do a test run on last month of available data
-    python3 prep_time_series_data.py dates --to_sql --test_run
+    python3 prep_time_series_data.py dates --send_to_sql --test_run
 """
 
 # Standard library imports
@@ -45,6 +45,7 @@ from dateconstants import (
     FIRST_DAY_OF_TRAIN_PRD,
     LAST_DAY_OF_TRAIN_PRD,
     FIRST_DAY_OF_TEST_PRD,
+    LAST_DAY_OF_TEST_PRD,
     PUBLIC_HOLIDAYS,
     PUBLIC_HOLIDAY_DTS,
     OLYMPICS2014,
@@ -585,13 +586,21 @@ def build_item_lvl_features(return_df=False, to_sql=False, test_run=False):
     else:
         sales = clean_sales_data(return_df=True, test_run=test_run)
 
-    # Column of all unique item_ids
-    item_level_features = (
-        sales[["item_id"]]
-        .drop_duplicates()
-        .sort_values(by="item_id")
-        .reset_index(drop=True)
-    )
+    # Create column of all unique item_ids, including those only in test data
+    # Add Indicator of Month of Year When Item Was First Sold
+    # Assign November (11) to items only in test data
+    # (assuming each one was sold at least once during that month)
+    # Replace 1's with 0's for items that show first date of sale in Jan 2013
+    item_level_features = pd.merge(
+        sales.groupby('item_id', as_index=False)["date"].min(),
+        test_df[['item_id']].drop_duplicates(),
+        on='item_id',
+        how='outer'
+    ).sort_values(by='item_id', ignore_index=True)
+    item_level_features['item_mon_of_first_sale'] = item_level_features.date.dt.month
+    item_level_features.loc[(item_level_features.date.dt.year == 2013) & (item_level_features.date.dt.month == 1), 'item_mon_of_first_sale'] = 0
+    item_level_features['item_mon_of_first_sale'] = item_level_features['item_mon_of_first_sale'].fillna(11).astype('int8').astype('category')
+    item_level_features.drop('date', axis=1, inplace=True)
 
     # Item Name, Category ID, Category Name
 
@@ -621,24 +630,6 @@ def build_item_lvl_features(return_df=False, to_sql=False, test_run=False):
         1,
         0,
     )
-
-    # Indicator of Month of Year When Item Was First Sold
-
-    item_level_features["item_mon_of_first_sale"] = (
-        sales.groupby("item_id")["date"].min().dt.month.values
-    )
-
-    # Replace 1's with 0's for items that show first date of sale in Jan 2013
-
-    jan13 = (
-        (sales.groupby("item_id")["date"].min().dt.year == 2013)
-        & (sales.groupby("item_id")["date"].min().dt.month == 1)
-    ).values
-
-    item_level_features.loc[jan13, "item_mon_of_first_sale"] = 0
-    item_level_features[
-        "item_mon_of_first_sale"
-    ] = item_level_features.item_mon_of_first_sale.astype("category")
 
     item_level_features = _downcast(item_level_features)
     item_level_features = _add_col_prefix(item_level_features, "i_")
@@ -782,12 +773,12 @@ def build_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     else:
         sales = clean_sales_data(return_df=True, test_run=test_run)
 
-    # Dates from Start to End of Training Period
+    # Dates from Start of Training Period to End of Test Period
     date_level_features = pd.DataFrame(
         {
             "date": pd.date_range(
                 datetime.datetime(*FIRST_DAY_OF_TRAIN_PRD),
-                datetime.datetime(*LAST_DAY_OF_TRAIN_PRD),
+                datetime.datetime(*LAST_DAY_OF_TEST_PRD),
             )
         }
     )
@@ -919,7 +910,7 @@ def build_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     macro_df_2013_2015 = macro_df.rename(columns={"timestamp": "date"})
     macro_df_2013_2015 = macro_df_2013_2015[
         (macro_df_2013_2015.date >= datetime.datetime(*FIRST_DAY_OF_TRAIN_PRD))
-        & (macro_df_2013_2015.date <= datetime.datetime(*LAST_DAY_OF_TRAIN_PRD))
+        & (macro_df_2013_2015.date <= datetime.datetime(*LAST_DAY_OF_TEST_PRD))
     ]
 
     # identify columns in macro_df dataset that have no null values
@@ -947,16 +938,16 @@ def build_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     # Date of a PS4 Game Release and Number of Games Released on Date
 
     # create column for date of a PS4 game release and column for number of games released on date
-    ps4games_before_Nov2015 = ps4games[
-        ps4games["Release date EU"] <= datetime.datetime(*LAST_DAY_OF_TRAIN_PRD)
+    ps4games_thru_Nov2015 = ps4games[
+        ps4games["Release date EU"] <= datetime.datetime(*LAST_DAY_OF_TEST_PRD)
     ][["Title", "Genre", "Release date EU", "Addons"]]
 
-    ps4games_before_Nov2015.rename(
+    ps4games_thru_Nov2015.rename(
         columns={"Release date EU": "release_dt"}, inplace=True
     )
 
     ps4_game_release_dts = (
-        ps4games_before_Nov2015.groupby("release_dt")
+        ps4games_thru_Nov2015.groupby("release_dt")
         .size()
         .reset_index()
         .rename(columns={"release_dt": "date", 0: "ps4_games_released_cnt"})
@@ -986,11 +977,19 @@ def build_date_lvl_features(return_df=False, to_sql=False, test_run=False):
     # Time Series Autocorrelations and Cross Correlations
 
     # add daily quantity column
+    date_level_features = date_level_features.merge(
+        sales.groupby("date").item_cnt_day.sum().reset_index(name="day_total_qty_sold"),
+        on='date',
+        how='left'
+    )
+    # change null values of daily quantity sold to 0's (even in test data, but those
+    # values will be updated during model scoring)
     date_level_features["day_total_qty_sold"] = (
-        sales.groupby("date").item_cnt_day.sum().values
+        date_level_features.day_total_qty_sold.fillna(0)
     )
 
     # create columns for 1-day, 6-day and 7-day lagged total quantity sold
+    # lagged values during test period will be updated later during model scoring
     for shift_val in [1, 6, 7]:
         date_level_features[
             f"day_total_qty_sold_{shift_val}day_lag"
@@ -3646,7 +3645,7 @@ def build_shop_item_date_lvl_features(return_df=False, to_sql=False, test_run=Fa
     results = []
     for i, (g, grp) in enumerate(
         shop_cat_date_total_qty[
-            grp_levels + ["date"] + ["shop_cat_qty_sold_day"]
+            grp_levels + ["date"] + ["shop_cat_qty_sold_day"] + ["shop_cat_qty_sold_last_7d"]
         ].groupby(grp_levels)
     ):
         if i % 100 == 0:
