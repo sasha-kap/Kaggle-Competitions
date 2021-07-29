@@ -16,8 +16,10 @@ Usage: run from the command line as such:
 
 """
 
+import argparse
 import csv
 import datetime
+from dateutil.relativedelta import relativedelta
 import logging
 from pathlib import Path
 
@@ -78,6 +80,13 @@ def run_query(sql_query, params=None):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "yrmonth",
+        metavar="<yrmonth>",
+        help="year-month for which to export data to CSV (required format: yymm)",
+    )
+    args = parser.parse_args()
 
     fmt = "%(name)-12s : %(asctime)s %(levelname)-8s %(lineno)-7d %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
@@ -170,48 +179,50 @@ def main():
             #     sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
     cols_to_select = ", ".join(sql_col_list)
 
+    ymd = datetime.datetime.strptime(args.yrmonth, "%y%m").strftime("%Y,%m,%d").replace(',0', ',')
+    ymd_end = (datetime.datetime.strptime(s, "%y%m") + relativedelta(day=31)).strftime("%Y,%m,%d").replace(',0', ',')
     query = (
         "WITH sid AS ("
-        "SELECT * FROM shop_item_dates WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         "nsd AS ("
-        "SELECT * FROM sid_n_sale_dts WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM sid_n_sale_dts WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM sid_addl_n_sale_dts WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM sid_addl_n_sale_dts WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         "ecv AS ("
-        "SELECT * FROM sid_expand_qty_cv_sqrd WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM sid_expand_qty_cv_sqrd WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM sid_addl_expand_qty_cv_sqrd WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM sid_addl_expand_qty_cv_sqrd WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         "eqs AS ("
-        "SELECT * FROM sid_expand_qty_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM sid_expand_qty_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM sid_addl_expand_qty_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM sid_addl_expand_qty_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         "rqs AS ("
-        "SELECT * FROM sid_roll_qty_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM sid_roll_qty_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM sid_addl_roll_qty_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM sid_addl_roll_qty_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         "ebw AS ("
-        "SELECT * FROM sid_expand_bw_sales_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31) "
+        f"SELECT * FROM sid_expand_bw_sales_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end}) "
         "UNION ALL "
-        "SELECT * FROM sid_addl_expand_bw_sales_stats WHERE sale_date >= make_date(2015,7,1) "
-        "AND sale_date <= make_date(2015,7,31)"
+        f"SELECT * FROM sid_addl_expand_bw_sales_stats WHERE sale_date >= make_date({ymd}) "
+        f"AND sale_date <= make_date({ymd_end})"
         "), "
         f"SELECT {cols_to_select}, "
         "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
@@ -253,9 +264,10 @@ def main():
 
     # "SELECT * from aws_s3.query_export_to_s3('select * from shops',"
 
+    yy_mm = '_'.join([args.yrmonth[:2], args.yrmonth[2:]])
     sql = (
         f"SELECT * from aws_s3.query_export_to_s3('{query}',"
-        f"aws_commons.create_s3_uri('my-rds-exports', 'shops_15_07.csv', 'us-west-2'),"
+        f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}.csv', 'us-west-2'),"
         f"options :='format csv, header');"
     )
     # sql = SQL(
