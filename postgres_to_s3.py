@@ -29,6 +29,7 @@ from config import config
 from rds_instance_mgmt import start_instance, stop_instance
 from timer import Timer
 
+
 @Timer(logger=logging.info)
 def run_query(sql_query, params=None):
     """ Connect to the PostgreSQL database server and run specified query,
@@ -59,6 +60,7 @@ def run_query(sql_query, params=None):
         cur = conn.cursor()
 
         # execute the provided SQL query
+        logging.debug(f"SQL query to be executed: {sql_query}")
         cur.execute(sql_query, params)
 
         # Make the changes to the database persistent
@@ -94,81 +96,166 @@ def main():
     )
 
     # statements to suppress irrelevant logging by boto3-related libraries
-    logging.getLogger('boto3').setLevel(logging.CRITICAL)
-    logging.getLogger('botocore').setLevel(logging.CRITICAL)
-    logging.getLogger('s3transfer').setLevel(logging.CRITICAL)
-    logging.getLogger('urllib3').setLevel(logging.CRITICAL)
+    logging.getLogger("boto3").setLevel(logging.CRITICAL)
+    logging.getLogger("botocore").setLevel(logging.CRITICAL)
+    logging.getLogger("s3transfer").setLevel(logging.CRITICAL)
+    logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 
     start_instance()
 
     col_name_dict = {
-        'shop_item_dates': 'sid',
-        'shops': 's',
-        'items': 'i',
-        'dates': 'd',
-        'shop_dates': 'sd',
-        'item_dates': 'id',
-        'shop_cat_dates': 'scd',
-        'sid_n_sale_dts': 'nsd',
-        'sid_expand_qty_cv_sqrd': 'ecv',
-        'sid_expand_qty_stats': 'eqs',
-        'sid_roll_qty_stats': 'rqs',
-        'sid_expand_bw_sales_stats': 'ebw'
+        "shop_item_dates": "sid",
+        "shops": "s",
+        "items": "i",
+        "dates": "d",
+        "shop_dates": "sd",
+        "item_dates": "id",
+        "shop_cat_dates": "scd",
+        "sid_n_sale_dts": "nsd",
+        "sid_expand_qty_cv_sqrd": "ecv",
+        "sid_expand_qty_stats": "eqs",
+        "sid_roll_qty_stats": "rqs",
+        "sid_expand_bw_sales_stats": "ebw",
+        "addl_shop_item_dates": "sid",
+        "sid_addl_n_sale_dts": "nsd",
+        "sid_addl_expand_qty_cv_sqrd": "ecv",
+        "sid_addl_expand_qty_stats": "eqs",
+        "sid_addl_roll_qty_stats": "rqs",
+        "sid_addl_expand_bw_sales_stats": "ebw",
     }
 
-    sql_col_list = []
-    with open('./rds_db/columns_output_2021_05_05_13_34.csv', 'r') as col_file:
-        csv_reader = csv.reader(col_file, delimiter=',')
-        next(csv_reader, None) # skip header row
-        for row in csv_reader:
-            if row[1] != 'sales_cleaned' and not (
-                row[1] != 'shop_item_dates' and row[2] in ['shop_id', 'item_id', 'sale_date']
-            ):
-                sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
+    # table_name,pg_relation_size
+    # shops,8192
+    # dates,442368
+    # items,4022272
+    # shop_dates,7716864
+    # test_data,9486336
+    # sales_cleaned,153190400
+    # shop_cat_dates,230793216
+    # item_dates,1495867392
+    # sid_addl_roll_qty_stats,3093823488
+    # sid_addl_n_sale_dts,3093823488
+    # sid_addl_expand_qty_cv_sqrd,3093823488
+    # sid_addl_expand_qty_stats,3093823488
+    # sid_addl_expand_bw_sales_stats,3645587456
+    # sid_n_sale_dts,5469306880
+    # sid_expand_qty_cv_sqrd,5469306880
+    # sid_expand_qty_stats,6339379200
+    # sid_roll_qty_stats,6339379200
+    # sid_expand_bw_sales_stats,7155671040
+    # addl_shop_item_dates,8592179200
+    # shop_item_dates,30550417408
 
+    sql_col_set = set()
+    sql_col_list = list()
+    # removed irrelevant "test" table rows from the CSV manually
+    with open("./rds_db/columns_output_2021_07_28_16_51.csv", "r") as col_file:
+        csv_reader = csv.reader(col_file, delimiter=",")
+        next(csv_reader, None)  # skip header row
+        for row in csv_reader:
+            if row[1] != "sales_cleaned":
+                # three columns are not added to column list because they will be dealt with
+                # separately in the SQL query below
+                # also, duplicate column names are removed from final column list with the help of the set
+                if row[2] not in sql_col_set and row[2] not in [
+                    "sid_shop_cat_qty_sold_day",
+                    "sid_shop_cat_qty_sold_last_7d",
+                    "sid_cat_sold_at_shop_before_day_flag",
+                ]:
+                    sql_col_set.add(row[2])
+                    sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
+            # if row[1] != 'sales_cleaned' and not (
+            #     row[1] != 'shop_item_dates' and row[2] in ['shop_id', 'item_id', 'sale_date', 'sid_item_category_id']
+            # ):
+            #     sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
     cols_to_select = ", ".join(sql_col_list)
 
     query = (
-        f"WITH sid AS ("
-            f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date(2015,8,1) "
-            f"AND sale_date <= make_date(2015,8,31)"
-        f") "
-        f"SELECT {cols_to_select} FROM sid "
-        f"LEFT JOIN shops s "
-        f"ON sid.shop_id = s.shop_id "
-        f"LEFT JOIN items i "
-        f"ON sid.item_id = i.item_id "
-        f"LEFT JOIN dates d "
-        f"ON sid.sale_date = d.sale_date "
-        f"LEFT JOIN shop_dates sd "
-        f"ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
-        f"LEFT JOIN item_dates id "
-        f"ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
-        f"LEFT JOIN shop_cat_dates scd "
-        f"ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
-        f"AND sid.sid_item_category_id = scd.sid_item_category_id "
-        f"LEFT JOIN sid_n_sale_dts nsd "
-        f"ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
-        f"AND sid.sale_date = nsd.sale_date "
-        f"LEFT JOIN sid_expand_qty_cv_sqrd ecv "
-        f"ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
-        f"AND sid.sale_date = ecv.sale_date "
-        f"LEFT JOIN sid_expand_qty_stats eqs "
-        f"ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
-        f"AND sid.sale_date = eqs.sale_date "
-        f"LEFT JOIN sid_roll_qty_stats rqs "
-        f"ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
-        f"AND sid.sale_date = rqs.sale_date "
-        f"LEFT JOIN sid_expand_bw_sales_stats ebw "
-        f"ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
-        f"AND sid.sale_date = ebw.sale_date"
+        "WITH sid AS ("
+        "SELECT * FROM shop_item_dates WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        "nsd AS ("
+        "SELECT * FROM sid_n_sale_dts WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM sid_addl_n_sale_dts WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        "ecv AS ("
+        "SELECT * FROM sid_expand_qty_cv_sqrd WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM sid_addl_expand_qty_cv_sqrd WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        "eqs AS ("
+        "SELECT * FROM sid_expand_qty_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM sid_addl_expand_qty_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        "rqs AS ("
+        "SELECT * FROM sid_roll_qty_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM sid_addl_roll_qty_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        "ebw AS ("
+        "SELECT * FROM sid_expand_bw_sales_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31) "
+        "UNION ALL "
+        "SELECT * FROM sid_addl_expand_bw_sales_stats WHERE sale_date >= make_date(2015,7,1) "
+        "AND sale_date <= make_date(2015,7,31)"
+        "), "
+        f"SELECT {cols_to_select}, "
+        "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
+        "AS sid_shop_cat_qty_sold_day, "
+        "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
+        "AS sid_shop_cat_qty_sold_last_7d, "
+        "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
+        "AS sid_cat_sold_at_shop_before_day_flag "
+        "FROM sid "
+        "INNER JOIN shops s "
+        "ON sid.shop_id = s.shop_id "
+        "INNER JOIN items i "
+        "ON sid.item_id = i.item_id "
+        "INNER JOIN dates d "
+        "ON sid.sale_date = d.sale_date "
+        "INNER JOIN shop_dates sd "
+        "ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
+        "INNER JOIN item_dates id "
+        "ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
+        "LEFT JOIN shop_cat_dates scd "
+        "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
+        "AND sid.sid_item_category_id = scd.sid_item_category_id "
+        "INNER JOIN sid_n_sale_dts nsd "
+        "ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
+        "AND sid.sale_date = nsd.sale_date "
+        "INNER JOIN sid_expand_qty_cv_sqrd ecv "
+        "ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
+        "AND sid.sale_date = ecv.sale_date "
+        "INNER JOIN sid_expand_qty_stats eqs "
+        "ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
+        "AND sid.sale_date = eqs.sale_date "
+        "INNER JOIN sid_roll_qty_stats rqs "
+        "ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
+        "AND sid.sale_date = rqs.sale_date "
+        "INNER JOIN sid_expand_bw_sales_stats ebw "
+        "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
+        "AND sid.sale_date = ebw.sale_date"
     )
 
     # "SELECT * from aws_s3.query_export_to_s3('select * from shops',"
 
     sql = (
         f"SELECT * from aws_s3.query_export_to_s3('{query}',"
-        f"aws_commons.create_s3_uri('my-rds-exports', 'shops_15_08.csv', 'us-west-2'),"
+        f"aws_commons.create_s3_uri('my-rds-exports', 'shops_15_07.csv', 'us-west-2'),"
         f"options :='format csv, header');"
     )
     # sql = SQL(
