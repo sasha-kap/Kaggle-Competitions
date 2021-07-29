@@ -179,8 +179,16 @@ def main():
             #     sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
     cols_to_select = ", ".join(sql_col_list)
 
-    ymd = datetime.datetime.strptime(args.yrmonth, "%y%m").strftime("%Y,%m,%d").replace(',0', ',')
-    ymd_end = (datetime.datetime.strptime(s, "%y%m") + relativedelta(day=31)).strftime("%Y,%m,%d").replace(',0', ',')
+    ymd = (
+        datetime.datetime.strptime(args.yrmonth, "%y%m")
+        .strftime("%Y,%m,%d")
+        .replace(",0", ",")
+    )
+    ymd_end = (
+        (datetime.datetime.strptime(args.yrmonth, "%y%m") + relativedelta(day=31))
+        .strftime("%Y,%m,%d")
+        .replace(",0", ",")
+    )
     query = (
         "WITH sid AS ("
         f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
@@ -264,7 +272,7 @@ def main():
 
     # "SELECT * from aws_s3.query_export_to_s3('select * from shops',"
 
-    yy_mm = '_'.join([args.yrmonth[:2], args.yrmonth[2:]])
+    yy_mm = "_".join([args.yrmonth[:2], args.yrmonth[2:]])
     sql = (
         f"SELECT * from aws_s3.query_export_to_s3('{query}',"
         f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}.csv', 'us-west-2'),"
