@@ -3,7 +3,7 @@ Functions:
 
 run_query
 - Run specified SQL query and export results in CSV format to specified
-s3 bucket
+s3 bucket (or request execution plan of the query)
 
 Copyright (c) 2021 Sasha Kapralov
 Licensed under the MIT License (see LICENSE for details)
@@ -12,7 +12,11 @@ Licensed under the MIT License (see LICENSE for details)
 
 Usage: run from the command line as such:
 
-    python3 postgres_to_s3.py
+    # query shop-item-dates for October 2015
+    python3 postgres_to_s3.py 1510
+
+    # request query execution plan only
+    python3 postgres_to_s3.py 1510 -e
 
 """
 
@@ -22,6 +26,7 @@ import datetime
 from dateutil.relativedelta import relativedelta
 import logging
 from pathlib import Path
+from pprint import pformat
 
 import psycopg2
 from psycopg2.sql import SQL
@@ -33,7 +38,7 @@ from timer import Timer
 
 
 @Timer(logger=logging.info)
-def run_query(sql_query, params=None):
+def run_query(sql_query, params=None, explain=False):
     """ Connect to the PostgreSQL database server and run specified query,
     exporting results in CSV format to specified s3 bucket.
 
@@ -43,6 +48,9 @@ def run_query(sql_query, params=None):
         SQL query to execute
     params : list, tuple or dict, optional, default: None
         List of parameters to pass to execute method
+    explain : bool
+        Whether to request the query execution plan without actually
+        executing the query
 
     Returns:
     --------
@@ -63,12 +71,22 @@ def run_query(sql_query, params=None):
 
         # execute the provided SQL query
         logging.debug(f"SQL query to be executed: {sql_query}")
-        cur.execute(sql_query, params)
 
-        # Make the changes to the database persistent
-        conn.commit()
-        # close the communication with the PostgreSQL
-        cur.close()
+        if explain:
+            # execute the provided SQL query
+            cur.execute("EXPLAIN (FORMAT JSON) " + sql_query)
+            logging.debug(pformat(cur.fetchall()))
+
+            # close the communication with the PostgreSQL
+            cur.close()
+
+        else:
+            cur.execute(sql_query, params)
+
+            # Make the changes to the database persistent
+            conn.commit()
+            # close the communication with the PostgreSQL
+            cur.close()
 
     except (Exception, psycopg2.DatabaseError) as error:
         logging.exception("Exception occurred")
@@ -85,6 +103,13 @@ def main():
         "yrmonth",
         metavar="<yrmonth>",
         help="year-month for which to export data to CSV (required format: yymm)",
+    )
+    parser.add_argument(
+        "--explain_plan",
+        "-e",
+        default=False,
+        action="store_true",
+        help="provides execution plan without executing the query (if included) or not (if not included)",
     )
     args = parser.parse_args()
 
@@ -158,7 +183,7 @@ def main():
     sql_col_set = set()
     sql_col_list = list()
     # removed irrelevant "test" table rows from the CSV manually
-    with open("./rds_db/columns_output_2021_07_28_16_51.csv", "r") as col_file:
+    with open("./rds_db/columns_output_2021_08_18_16_50.csv", "r") as col_file:
         csv_reader = csv.reader(col_file, delimiter=",")
         next(csv_reader, None)  # skip header row
         for row in csv_reader:
@@ -231,7 +256,7 @@ def main():
         "UNION ALL "
         f"SELECT * FROM sid_addl_expand_bw_sales_stats WHERE sale_date >= make_date({ymd}) "
         f"AND sale_date <= make_date({ymd_end})"
-        "), "
+        ") "
         f"SELECT {cols_to_select}, "
         "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
         "AS sid_shop_cat_qty_sold_day, "
@@ -272,18 +297,22 @@ def main():
 
     # "SELECT * from aws_s3.query_export_to_s3('select * from shops',"
 
-    yy_mm = "_".join([args.yrmonth[:2], args.yrmonth[2:]])
-    sql = (
-        f"SELECT * from aws_s3.query_export_to_s3('{query}',"
-        f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}.csv', 'us-west-2'),"
-        f"options :='format csv, header');"
-    )
-    # sql = SQL(
-    #     f"SELECT * from aws_s3.query_export_to_s3('{query}',"
-    #     f"aws_commons.create_s3_uri('my-rds-exports', 'shops.csv', 'us-west-2'),"
-    #     f"options :='format csv');"
-    # )
-    run_query(sql)
+    if args.explain_plan:
+        sql = query
+
+    else:
+        yy_mm = "_".join([args.yrmonth[:2], args.yrmonth[2:]])
+        sql = (
+            f"SELECT * from aws_s3.query_export_to_s3('{query}',"
+            f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}.csv', 'us-west-2'),"
+            f"options :='format csv, header');"
+        )
+        # sql = SQL(
+        #     f"SELECT * from aws_s3.query_export_to_s3('{query}',"
+        #     f"aws_commons.create_s3_uri('my-rds-exports', 'shops.csv', 'us-west-2'),"
+        #     f"options :='format csv');"
+        # )
+    run_query(sql, explain=args.explain_plan)
 
 
 if __name__ == "__main__":
