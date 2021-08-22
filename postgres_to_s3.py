@@ -73,12 +73,20 @@ def run_query(sql_query, params=None, explain=False):
         logging.debug(f"SQL query to be executed: {sql_query}")
 
         if explain:
-            # execute the provided SQL query
-            cur.execute("EXPLAIN (FORMAT JSON) " + sql_query)
-            logging.debug(pformat(cur.fetchall()))
+            if isinstance(sql_query, str):
+                # execute the provided SQL query
+                cur.execute("EXPLAIN (FORMAT JSON) " + sql_query)
+                logging.debug(pformat(cur.fetchall()))
 
-            # close the communication with the PostgreSQL
-            cur.close()
+                # close the communication with the PostgreSQL
+                cur.close()
+            elif isinstance(sql_query, list):
+                for q in sql_query:
+                    # cur.execute("SET ENABLE_NESTLOOP TO OFF")
+                    cur.execute("EXPLAIN (FORMAT JSON) " + q)
+                    logging.debug(pformat(cur.fetchall()))
+                # close the communication with the PostgreSQL
+                cur.close()
 
         else:
             if isinstance(sql_query, str):
@@ -204,6 +212,7 @@ def main():
                     "sid_shop_cat_qty_sold_last_7d",
                     "sid_cat_sold_at_shop_before_day_flag",
                 ]:
+                # if row[2] not in sql_col_set:
                     sql_col_set.add(row[2])
                     sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
             # if row[1] != 'sales_cleaned' and not (
@@ -211,7 +220,6 @@ def main():
             # ):
             #     sql_col_list.append(".".join([col_name_dict[row[1]], row[2]]))
     cols_to_select = ", ".join(sql_col_list)
-    cols_to_select_addl = cols_to_select.replace('sid.', 'asid.')
 
     ymd = (
         datetime.datetime.strptime(args.yrmonth, "%y%m")
@@ -223,23 +231,16 @@ def main():
         .strftime("%Y,%m,%d")
         .replace(",0", ",")
     )
-    # this query will not work because same columns exist in multiple tables being joined
-    # (e.g., sid_addl_expand_bw_sales_stats and sid_expand_bw_sales_stats)
-    # query = (
-    #     f"SELECT {cols_to_select}, "
-    #     "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
-    #     "AS sid_shop_cat_qty_sold_day, "
-    #     "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
-    #     "AS sid_shop_cat_qty_sold_last_7d, "
-    #     "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
-    #     "AS sid_cat_sold_at_shop_before_day_flag "
-    #     "FROM ("
-    #         f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
-    #         f"AND sale_date <= make_date({ymd_end})"
-    #         f"UNION ALL "
-    #         f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
-    #         f"AND sale_date <= make_date({ymd_end})"
-    #     ") sid "
+    # this query used standard joins with where, instead of CTE, but it did not help
+    # query1 = (
+    #     f"SELECT {cols_to_select} "
+    #     # "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
+    #     # "AS sid_shop_cat_qty_sold_day, "
+    #     # "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
+    #     # "AS sid_shop_cat_qty_sold_last_7d, "
+    #     # "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
+    #     # "AS sid_cat_sold_at_shop_before_day_flag "
+    #     "FROM shop_item_dates sid "
     #     "INNER JOIN shops s "
     #     "ON sid.shop_id = s.shop_id "
     #     "INNER JOIN items i "
@@ -250,7 +251,7 @@ def main():
     #     "ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
     #     "INNER JOIN item_dates id "
     #     "ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
-    #     "LEFT JOIN shop_cat_dates scd "
+    #     "INNER JOIN shop_cat_dates scd "
     #     "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
     #     "AND sid.sid_item_category_id = scd.sid_item_category_id "
     #     "INNER JOIN sid_n_sale_dts nsd "
@@ -268,33 +269,103 @@ def main():
     #     "INNER JOIN sid_expand_bw_sales_stats ebw "
     #     "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
     #     "AND sid.sale_date = ebw.sale_date "
-    #     "INNER JOIN sid_addl_n_sale_dts nsd "
+    #     f"WHERE sid.sale_date >= make_date({ymd}) "
+    #     f"AND sid.sale_date <= make_date({ymd_end})"
+    # )
+    # this query changed the order of joins but that did not help
+    # query1 = (
+    #     "WITH sid AS ("
+    #         f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
+    #         f"AND sale_date <= make_date({ymd_end})"
+    #     ") "
+    #     f"SELECT {cols_to_select} "
+    #     # "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
+    #     # "AS sid_shop_cat_qty_sold_day, "
+    #     # "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
+    #     # "AS sid_shop_cat_qty_sold_last_7d, "
+    #     # "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
+    #     # "AS sid_cat_sold_at_shop_before_day_flag "
+    #     "FROM sid "
+    #     "INNER JOIN sid_n_sale_dts nsd "
     #     "ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
     #     "AND sid.sale_date = nsd.sale_date "
-    #     "INNER JOIN sid_addl_expand_qty_cv_sqrd ecv "
+    #     "INNER JOIN sid_expand_qty_cv_sqrd ecv "
     #     "ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
     #     "AND sid.sale_date = ecv.sale_date "
-    #     "INNER JOIN sid_addl_expand_qty_stats eqs "
+    #     "INNER JOIN sid_expand_qty_stats eqs "
     #     "ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
     #     "AND sid.sale_date = eqs.sale_date "
-    #     "INNER JOIN sid_addl_roll_qty_stats rqs "
+    #     "INNER JOIN sid_roll_qty_stats rqs "
     #     "ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
     #     "AND sid.sale_date = rqs.sale_date "
-    #     "INNER JOIN sid_addl_expand_bw_sales_stats ebw "
+    #     "INNER JOIN sid_expand_bw_sales_stats ebw "
     #     "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
-    #     "AND sid.sale_date = ebw.sale_date"
+    #     "AND sid.sale_date = ebw.sale_date "
+    #     "INNER JOIN shops s "
+    #     "ON sid.shop_id = s.shop_id "
+    #     "INNER JOIN items i "
+    #     "ON sid.item_id = i.item_id "
+    #     "INNER JOIN dates d "
+    #     "ON sid.sale_date = d.sale_date "
+    #     "INNER JOIN shop_dates sd "
+    #     "ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
+    #     "INNER JOIN item_dates id "
+    #     "ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
+    #     "INNER JOIN shop_cat_dates scd "
+    #     "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
+    #     "AND sid.sid_item_category_id = scd.sid_item_category_id"
     # )
-    # this query started but took several hours and connection was lost
-    # query execution plan is here: logging_2021_08_19_17_11.log
-    query = (
-        # "WITH sid AS ("
-        #     f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
-        #     f"AND sale_date <= make_date({ymd_end})"
-        # "), "
-        # "asid AS ("
-        #     f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
-        #     f"AND sale_date <= make_date({ymd_end})"
-        # ") "
+    # this query1 ran after RDS instance was changed to provisional IOPS
+    # it produced a CSV on S3 instance (in about 30 minutes), but the
+    # connection was still lost and the log (logging_2021_08_21_15_38.log) was
+    # not complete and query2 did not run.
+    query1 = (
+        "WITH sid AS ("
+            f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
+            f"AND sale_date <= make_date({ymd_end})"
+        ") "
+        f"SELECT {cols_to_select}, "
+        "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
+        "AS sid_shop_cat_qty_sold_day, "
+        "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
+        "AS sid_shop_cat_qty_sold_last_7d, "
+        "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
+        "AS sid_cat_sold_at_shop_before_day_flag "
+        "FROM sid "
+        "INNER JOIN shops s "
+        "ON sid.shop_id = s.shop_id "
+        "INNER JOIN items i "
+        "ON sid.item_id = i.item_id "
+        "INNER JOIN dates d "
+        "ON sid.sale_date = d.sale_date "
+        "INNER JOIN shop_dates sd "
+        "ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
+        "INNER JOIN item_dates id "
+        "ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
+        "INNER JOIN shop_cat_dates scd "
+        "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
+        "AND sid.sid_item_category_id = scd.sid_item_category_id "
+        "INNER JOIN sid_n_sale_dts nsd "
+        "ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
+        "AND sid.sale_date = nsd.sale_date "
+        "INNER JOIN sid_expand_qty_cv_sqrd ecv "
+        "ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
+        "AND sid.sale_date = ecv.sale_date "
+        "INNER JOIN sid_expand_qty_stats eqs "
+        "ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
+        "AND sid.sale_date = eqs.sale_date "
+        "INNER JOIN sid_roll_qty_stats rqs "
+        "ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
+        "AND sid.sale_date = rqs.sale_date "
+        "INNER JOIN sid_expand_bw_sales_stats ebw "
+        "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
+        "AND sid.sale_date = ebw.sale_date"
+    )
+    query2 = (
+        "WITH sid AS ("
+            f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
+            f"AND sale_date <= make_date({ymd_end})"
+        ") "
         f"SELECT {cols_to_select}, "
         "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
         "AS sid_shop_cat_qty_sold_day, "
@@ -316,177 +387,41 @@ def main():
         "LEFT JOIN shop_cat_dates scd "
         "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
         "AND sid.sid_item_category_id = scd.sid_item_category_id "
-        "INNER JOIN sid_n_sale_dts nsd "
+        "INNER JOIN sid_addl_n_sale_dts nsd "
         "ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
         "AND sid.sale_date = nsd.sale_date "
-        "INNER JOIN sid_expand_qty_cv_sqrd ecv "
+        "INNER JOIN sid_addl_expand_qty_cv_sqrd ecv "
         "ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
         "AND sid.sale_date = ecv.sale_date "
-        "INNER JOIN sid_expand_qty_stats eqs "
+        "INNER JOIN sid_addl_expand_qty_stats eqs "
         "ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
         "AND sid.sale_date = eqs.sale_date "
-        "INNER JOIN sid_roll_qty_stats rqs "
+        "INNER JOIN sid_addl_roll_qty_stats rqs "
         "ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
         "AND sid.sale_date = rqs.sale_date "
-        "INNER JOIN sid_expand_bw_sales_stats ebw "
-        "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
-        "AND sid.sale_date = ebw.sale_date "
-        "UNION ALL "
-        f"SELECT {cols_to_select_addl}, "
-        "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
-        "AS sid_shop_cat_qty_sold_day, "
-        "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
-        "AS sid_shop_cat_qty_sold_last_7d, "
-        "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
-        "AS sid_cat_sold_at_shop_before_day_flag "
-        "FROM asid "
-        "INNER JOIN shops s "
-        "ON asid.shop_id = s.shop_id "
-        "INNER JOIN items i "
-        "ON asid.item_id = i.item_id "
-        "INNER JOIN dates d "
-        "ON asid.sale_date = d.sale_date "
-        "INNER JOIN shop_dates sd "
-        "ON asid.shop_id = sd.shop_id AND asid.sale_date = sd.sale_date "
-        "INNER JOIN item_dates id "
-        "ON asid.item_id = id.item_id AND asid.sale_date = id.sale_date "
-        "LEFT JOIN shop_cat_dates scd "
-        "ON asid.shop_id = scd.shop_id AND asid.sale_date = scd.sale_date "
-        "AND asid.sid_item_category_id = scd.sid_item_category_id "
-        "INNER JOIN sid_addl_n_sale_dts nsd "
-        "ON asid.shop_id = nsd.shop_id AND asid.item_id = nsd.item_id "
-        "AND asid.sale_date = nsd.sale_date "
-        "INNER JOIN sid_addl_expand_qty_cv_sqrd ecv "
-        "ON asid.shop_id = ecv.shop_id AND asid.item_id = ecv.item_id "
-        "AND asid.sale_date = ecv.sale_date "
-        "INNER JOIN sid_addl_expand_qty_stats eqs "
-        "ON asid.shop_id = eqs.shop_id AND asid.item_id = eqs.item_id "
-        "AND asid.sale_date = eqs.sale_date "
-        "INNER JOIN sid_addl_roll_qty_stats rqs "
-        "ON asid.shop_id = rqs.shop_id AND asid.item_id = rqs.item_id "
-        "AND asid.sale_date = rqs.sale_date "
         "INNER JOIN sid_addl_expand_bw_sales_stats ebw "
-        "ON asid.shop_id = ebw.shop_id AND asid.item_id = ebw.item_id "
-        "AND asid.sale_date = ebw.sale_date"
+        "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
+        "AND sid.sale_date = ebw.sale_date"
     )
-    # this query returned a considerably costlier execution plan than the query
-    # above and was not tried
-    # query execution plan is here: logging_2021_08_19_16_20.log
-    # query = (
-    #     "WITH sid AS ("
-    #     f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     "), "
-    #     "nsd AS ("
-    #     f"SELECT * FROM sid_n_sale_dts WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM sid_addl_n_sale_dts WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     "), "
-    #     "ecv AS ("
-    #     f"SELECT * FROM sid_expand_qty_cv_sqrd WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM sid_addl_expand_qty_cv_sqrd WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     "), "
-    #     "eqs AS ("
-    #     f"SELECT * FROM sid_expand_qty_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM sid_addl_expand_qty_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     "), "
-    #     "rqs AS ("
-    #     f"SELECT * FROM sid_roll_qty_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM sid_addl_roll_qty_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     "), "
-    #     "ebw AS ("
-    #     f"SELECT * FROM sid_expand_bw_sales_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end}) "
-    #     "UNION ALL "
-    #     f"SELECT * FROM sid_addl_expand_bw_sales_stats WHERE sale_date >= make_date({ymd}) "
-    #     f"AND sale_date <= make_date({ymd_end})"
-    #     ") "
-    #     f"SELECT {cols_to_select}, "
-    #     "CASE WHEN scd.sid_shop_cat_qty_sold_day IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_day END "
-    #     "AS sid_shop_cat_qty_sold_day, "
-    #     "CASE WHEN scd.sid_shop_cat_qty_sold_last_7d IS NULL THEN 0 ELSE scd.sid_shop_cat_qty_sold_last_7d END "
-    #     "AS sid_shop_cat_qty_sold_last_7d, "
-    #     "CASE WHEN scd.sid_cat_sold_at_shop_before_day_flag IS NULL THEN 0 ELSE scd.sid_cat_sold_at_shop_before_day_flag END "
-    #     "AS sid_cat_sold_at_shop_before_day_flag "
-    #     "FROM sid "
-    #     "INNER JOIN shops s "
-    #     "ON sid.shop_id = s.shop_id "
-    #     "INNER JOIN items i "
-    #     "ON sid.item_id = i.item_id "
-    #     "INNER JOIN dates d "
-    #     "ON sid.sale_date = d.sale_date "
-    #     "INNER JOIN shop_dates sd "
-    #     "ON sid.shop_id = sd.shop_id AND sid.sale_date = sd.sale_date "
-    #     "INNER JOIN item_dates id "
-    #     "ON sid.item_id = id.item_id AND sid.sale_date = id.sale_date "
-    #     "LEFT JOIN shop_cat_dates scd "
-    #     "ON sid.shop_id = scd.shop_id AND sid.sale_date = scd.sale_date "
-    #     "AND sid.sid_item_category_id = scd.sid_item_category_id "
-    #     "INNER JOIN sid_n_sale_dts nsd "
-    #     "ON sid.shop_id = nsd.shop_id AND sid.item_id = nsd.item_id "
-    #     "AND sid.sale_date = nsd.sale_date "
-    #     "INNER JOIN sid_expand_qty_cv_sqrd ecv "
-    #     "ON sid.shop_id = ecv.shop_id AND sid.item_id = ecv.item_id "
-    #     "AND sid.sale_date = ecv.sale_date "
-    #     "INNER JOIN sid_expand_qty_stats eqs "
-    #     "ON sid.shop_id = eqs.shop_id AND sid.item_id = eqs.item_id "
-    #     "AND sid.sale_date = eqs.sale_date "
-    #     "INNER JOIN sid_roll_qty_stats rqs "
-    #     "ON sid.shop_id = rqs.shop_id AND sid.item_id = rqs.item_id "
-    #     "AND sid.sale_date = rqs.sale_date "
-    #     "INNER JOIN sid_expand_bw_sales_stats ebw "
-    #     "ON sid.shop_id = ebw.shop_id AND sid.item_id = ebw.item_id "
-    #     "AND sid.sale_date = ebw.sale_date"
-    # )
 
     # "SELECT * from aws_s3.query_export_to_s3('select * from shops',"
 
-    # creation of indexed tables instead of CTEs in attempt to improve
-    # query performance
-    initial_queries = (
-        "DROP TABLE IF EXISTS sid;"
-        "CREATE TABLE sid AS "
-        f"SELECT * FROM shop_item_dates WHERE sale_date >= make_date({ymd}) "
-        f"AND sale_date <= make_date({ymd_end});"
-        "CREATE INDEX sid_sale_date_idx ON sid (sale_date);"
-        "CREATE INDEX sid_shop_id_idx ON sid (shop_id);"
-        "CREATE INDEX sid_item_id_idx ON sid (item_id);"
-        "DROP TABLE IF EXISTS asid;"
-        "CREATE TABLE asid AS "
-        f"SELECT * FROM addl_shop_item_dates WHERE sale_date >= make_date({ymd}) "
-        f"AND sale_date <= make_date({ymd_end});"
-        "CREATE INDEX asid_sale_date_idx ON asid (sale_date);"
-        "CREATE INDEX asid_shop_id_idx ON asid (shop_id);"
-        "CREATE INDEX asid_item_id_idx ON asid (item_id)"
-    ).split(";")
     if args.explain_plan:
-        run_query(initial_queries)
-        logging.info("Initial queries completed.")
-        sql = query
+        sql = [query1, query2]
 
     else:
-        run_query(initial_queries)
-        logging.info("Initial queries completed.")
         yy_mm = "_".join([args.yrmonth[:2], args.yrmonth[2:]])
-        sql = (
-            f"SELECT * from aws_s3.query_export_to_s3('{query}',"
+        sql1 = (
+            f"SELECT * from aws_s3.query_export_to_s3('{query1}',"
             f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}.csv', 'us-west-2'),"
             f"options :='format csv, header');"
         )
+        sql2 = (
+            f"SELECT * from aws_s3.query_export_to_s3('{query2}',"
+            f"aws_commons.create_s3_uri('my-rds-exports', 'shops_{yy_mm}_addl.csv', 'us-west-2'),"
+            f"options :='format csv, header');"
+        )
+        sql = [sql1, sql2]
         # sql = SQL(
         #     f"SELECT * from aws_s3.query_export_to_s3('{query}',"
         #     f"aws_commons.create_s3_uri('my-rds-exports', 'shops.csv', 'us-west-2'),"
