@@ -72,6 +72,10 @@ def run_query(sql_query, params=None, explain=False):
         # execute the provided SQL query
         logging.debug(f"SQL query to be executed: {sql_query}")
 
+        # see https://amplitude.engineering/how-a-single-postgresql-config-change-improved-slow-query-performance-by-50x-85593b8991b0
+        # also https://www.postgresql.org/docs/12/runtime-config-query.html
+        cur.execute("SET random_page_cost = 1")
+
         if explain:
             if isinstance(sql_query, str):
                 # execute the provided SQL query
